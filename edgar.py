@@ -312,21 +312,23 @@ def _parse_meeting_info(html_text: str) -> dict:
 
     meeting_date = ""
     if "Annual" in meeting_type:
-        meeting_date = _extract_annual_meeting_date(text)
+        date_str, confidence = _extract_annual_meeting_date(text)
+        meeting_date = f"{date_str} {confidence}".strip() if date_str else ""
 
     return {"meeting_type": meeting_type, "meeting_date": meeting_date}
 
 
-def _extract_annual_meeting_date(text: str) -> str:
+def _extract_annual_meeting_date(text: str) -> tuple[str, str]:
+    """Return (date_string, confidence_emoji) where emoji is 🟢 (high) or 🟡 (medium)."""
     m = _MEETING_DATE_CONTEXT_RE.search(text)
     if m:
-        return m.group(1).strip().title()
+        return m.group(1).strip().title(), "🟢"
 
     annual_match = _ANNUAL_RE.search(text)
     if annual_match:
         snippet = text[annual_match.start(): annual_match.start() + 400]
         m2 = _MONTH_DATE_RE.search(snippet)
         if m2:
-            return m2.group(0).strip().title()
+            return m2.group(0).strip().title(), "🟡"
 
-    return ""
+    return "", ""
