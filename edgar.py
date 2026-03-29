@@ -102,12 +102,23 @@ def fetch_daily_index(filing_date: date, session: requests.Session) -> pd.DataFr
             ) from exc
         raise
 
-    # The .idx file is fixed-width with 6 header/blank lines before data rows.
-    content = io.StringIO(resp.text)
+    # The .idx file has a variable-length header (metadata + blanks + two-line
+    # column header + dashed separator).  Locate the separator dynamically so
+    # we never depend on a hardcoded line count.
+    lines = resp.text.splitlines()
+    sep_idx = next(
+        (i for i, line in enumerate(lines) if line.startswith("---")), None
+    )
+    if sep_idx is None:
+        raise ValueError(
+            "Could not parse EDGAR index file: separator line not found. "
+            "The file format may have changed."
+        )
+    data_lines = [line for line in lines[sep_idx + 1:] if line.strip()]
+    content = io.StringIO("\n".join(data_lines))
     try:
         df = pd.read_fwf(
             content,
-            skiprows=6,
             header=None,
             names=["form_type", "company_name", "cik", "date_filed", "filename"],
             dtype=str,
