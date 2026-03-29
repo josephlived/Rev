@@ -14,6 +14,22 @@ import edgar
 import russell
 from config import TARGET_FORMS
 
+
+def _build_display(df: pd.DataFrame) -> pd.DataFrame:
+    """Reorder and rename columns for the results table."""
+    out = pd.DataFrame()
+    out["Form Type"] = df["form_type"]
+    out["Company"] = df["company_name"]
+    out["Ticker"] = df["ticker"]
+    out["CIK"] = df["cik"]
+    out["Meeting Type"] = df["meeting_type"].replace("", "—")
+    out["Meeting Date"] = df["meeting_date"].replace("", "—")
+    out["Filing"] = df["filename"].apply(
+        lambda f: f"https://www.sec.gov/Archives/{f}" if pd.notna(f) else ""
+    )
+    return out
+
+
 # ── Page setup ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="SEC Filing Collator",
@@ -169,18 +185,3 @@ if fetch_btn:
     )
 
 
-# ── Helper ────────────────────────────────────────────────────────────────────
-
-def _build_display(df: pd.DataFrame) -> pd.DataFrame:
-    """Reorder and rename columns for the results table."""
-    out = pd.DataFrame()
-    out["Form Type"] = df["form_type"]
-    out["Company"] = df["company_name"]
-    out["Ticker"] = df["ticker"]
-    out["CIK"] = df["cik"]
-    out["Meeting Type"] = df["meeting_type"].replace("", "\u2014")
-    out["Meeting Date"] = df["meeting_date"].replace("", "\u2014")
-    out["Filing"] = df["filename"].apply(
-        lambda f: f"https://www.sec.gov/Archives/{f}" if pd.notna(f) else ""
-    )
-    return out
