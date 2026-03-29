@@ -125,10 +125,9 @@ if fetch_btn:
         source_label = uploaded_file.name
         with st.status(f"Loading constituent list from {uploaded_file.name}…", expanded=False) as status:
             try:
-                ticker_cik_map, ticker_index_map = russell.load_from_excel(uploaded_file)
-                russell_cik_set = set(ticker_cik_map.values())
+                cik_set, ticker_from_cik, index_from_cik = russell.load_from_excel(uploaded_file)
                 status.update(
-                    label=f"✅ Loaded {len(ticker_cik_map)} tickers from {uploaded_file.name}",
+                    label=f"✅ Loaded {len(cik_set)} companies from {uploaded_file.name}",
                     state="complete",
                 )
             except Exception as exc:
@@ -144,11 +143,11 @@ if fetch_btn:
                 r3k_log.write(msg)
 
             try:
-                ticker_cik_map = russell.load_russell_ciks(progress_cb=_r3k_log)
-                ticker_index_map = {}
-                russell_cik_set = set(ticker_cik_map.values())
+                cik_set, ticker_from_cik, index_from_cik = russell.load_russell_ciks(
+                    progress_cb=_r3k_log
+                )
                 status.update(
-                    label=f"✅ Russell 3000 loaded — {len(ticker_cik_map)} tickers",
+                    label=f"✅ Russell 3000 loaded — {len(cik_set)} companies",
                     state="complete",
                 )
             except Exception as exc:
@@ -174,8 +173,8 @@ if fetch_btn:
             st.stop()
 
     # ── Step 3: Filter + enrich ───────────────────────────────────────────────
-    filtered_df = edgar.filter_filings(raw_df, russell_cik_set)
-    filtered_df = edgar.enrich_with_ticker(filtered_df, ticker_cik_map, ticker_index_map)
+    filtered_df = edgar.filter_filings(raw_df, cik_set)
+    filtered_df = edgar.enrich_with_ticker(filtered_df, ticker_from_cik, index_from_cik)
 
     if filtered_df.empty:
         st.info(

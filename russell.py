@@ -1,16 +1,22 @@
 """
-Russell 3000 index management.
+Russell 3000 / constituent list management.
 
-Downloads the iShares IWV ETF holdings CSV to get tickers, cross-references
-with the SEC company_tickers.json to resolve CIKs, and caches the result
-locally so we don't hammer remote servers on every run.
+All public functions return the same 3-tuple so callers can treat the
+iShares fallback and a user-uploaded file identically:
+
+    (cik_set, ticker_from_cik, index_from_cik)
+
+    cik_set          – set of str(int(cik)) strings for filtering
+    ticker_from_cik  – {str(int(cik)): ticker_symbol}
+    index_from_cik   – {str(int(cik)): index_name}  (empty when not available)
 """
 import io
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -24,21 +30,24 @@ from config import (
     SEC_USER_AGENT,
 )
 
+_PH_TZ = ZoneInfo("Asia/Manila")
+
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def load_from_excel(
     file_obj,
     progress_cb: Callable[[str], None] | None = None,
-) -> tuple[dict[str, str], dict[str, str]]:
+) -> tuple[set[str], dict[str, str], dict[str, str]]:
     """
     Load a constituent list from an uploaded Excel or CSV file.
 
-    The file must have a Ticker column (matched case-insensitively against
-    'ticker' or 'symbol').  An optional Index column ('index', 'index name',
-    'group', 'etf') is used to populate the index_name display column.
+    Column detection (all case-insensitive):
+      - CIK column  : "cik", "entity id", "entity_id"  ← preferred
+      - Ticker column: "ticker", "symbol"               ← fallback
+      - Index column : "index name", "index", "group", "etf"  ← optional
 
-    Returns (ticker_cik_map, ticker_index_map) where both are {TICKER: str}.
+    Returns (cik_set, ticker_from_cik, index_from_cik).
     """
     name = getattr(file_obj, "name", "")
     if name.lower().endswith(".csv"):
@@ -46,78 +55,122 @@ def load_from_excel(
     else:
         df = pd.read_excel(file_obj, dtype=str)
 
-    # Normalise column names for lookup
     col_lower = {c.lower().strip(): c for c in df.columns}
 
-    # Find ticker column
-    ticker_col = next(
-        (col_lower[k] for k in ("ticker", "symbol") if k in col_lower), None
+    # ── Find identifier column ────────────────────────────────────────────────
+    cik_col = next(
+        (col_lower[k] for k in ("cik", "entity id", "entity_id") if k in col_lower),
+        None,
     )
-    if ticker_col is None:
-        raise ValueError(
-            "Could not find a 'Ticker' or 'Symbol' column in the uploaded file. "
-            f"Columns found: {list(df.columns)}"
-        )
-
-    # Find optional index column
-    index_col = next(
-        (col_lower[k] for k in ("index", "index name", "group", "etf") if k in col_lower),
+    ticker_col = next(
+        (col_lower[k] for k in ("ticker", "symbol") if k in col_lower),
         None,
     )
 
-    tickers = set(df[ticker_col].dropna().str.upper().str.strip())
-    tickers.discard("")
+    if cik_col is None and ticker_col is None:
+        raise ValueError(
+            "Could not find a 'CIK', 'Ticker', or 'Symbol' column in the uploaded file. "
+            f"Columns found: {list(df.columns)}"
+        )
+
+    # ── Find optional index column ────────────────────────────────────────────
+    index_col = next(
+        (col_lower[k] for k in ("index name", "index", "group", "etf") if k in col_lower),
+        None,
+    )
 
     _log(progress_cb, "Downloading SEC company → CIK map…")
-    cik_map = _fetch_sec_cik_map()
+    sec_cik_map = _fetch_sec_cik_map()                    # {TICKER: padded_cik}
+    sec_ticker_map = {v: k for k, v in sec_cik_map.items()}  # {padded_cik: TICKER}
 
-    ticker_cik_map = {}
-    missed = []
-    for ticker in sorted(tickers):
-        cik = cik_map.get(ticker)
-        if cik:
-            ticker_cik_map[ticker] = cik
-        else:
-            missed.append(ticker)
-    if missed:
-        print(f"[excel] {len(missed)} tickers not found in SEC map: {missed[:10]}")
+    if cik_col is not None:
+        # ── CIK-first path ────────────────────────────────────────────────────
+        raw_ciks = df[cik_col].dropna().astype(str).str.strip()
+        cik_set: set[str] = set()
+        index_from_cik: dict[str, str] = {}
+        ticker_from_cik: dict[str, str] = {}
 
-    ticker_index_map: dict[str, str] = {}
-    if index_col:
-        for _, row in df.iterrows():
-            t = str(row[ticker_col]).upper().strip() if pd.notna(row[ticker_col]) else ""
-            idx = str(row[index_col]).strip() if pd.notna(row[index_col]) else ""
-            if t:
-                ticker_index_map[t] = idx
+        for idx, row in df.iterrows():
+            raw = str(row[cik_col]).strip() if pd.notna(row[cik_col]) else ""
+            if not raw or raw.lower() == "nan":
+                continue
+            try:
+                norm = str(int(float(raw)))  # "0000712034" or "712034.0" → "712034"
+            except ValueError:
+                continue
+            cik_set.add(norm)
+            # index name
+            if index_col and pd.notna(row.get(index_col, None)):
+                index_from_cik[norm] = str(row[index_col]).strip()
+            # ticker — prefer file's ticker column, else reverse-lookup
+            padded = norm.zfill(10)
+            if ticker_col and pd.notna(row.get(ticker_col, None)):
+                ticker_from_cik[norm] = str(row[ticker_col]).strip().upper()
+            elif padded in sec_ticker_map:
+                ticker_from_cik[norm] = sec_ticker_map[padded]
 
-    return ticker_cik_map, ticker_index_map
+        return cik_set, ticker_from_cik, index_from_cik
+
+    else:
+        # ── Ticker-first path ─────────────────────────────────────────────────
+        tickers = set(df[ticker_col].dropna().str.upper().str.strip()) - {""}
+        cik_set = set()
+        ticker_from_cik = {}
+        index_from_cik = {}
+        missed = []
+
+        for ticker in sorted(tickers):
+            padded = sec_cik_map.get(ticker)
+            if not padded:
+                missed.append(ticker)
+                continue
+            norm = str(int(padded))
+            cik_set.add(norm)
+            ticker_from_cik[norm] = ticker
+
+        if missed:
+            print(f"[excel] {len(missed)} tickers not found in SEC map: {missed[:10]}")
+
+        if index_col:
+            for _, row in df.iterrows():
+                t = str(row[ticker_col]).upper().strip() if pd.notna(row[ticker_col]) else ""
+                padded = sec_cik_map.get(t)
+                if not padded:
+                    continue
+                norm = str(int(padded))
+                idx_val = str(row[index_col]).strip() if pd.notna(row.get(index_col)) else ""
+                index_from_cik[norm] = idx_val
+
+        return cik_set, ticker_from_cik, index_from_cik
 
 
 def load_russell_ciks(
     force_refresh: bool = False,
     progress_cb: Callable[[str], None] | None = None,
-) -> dict[str, str]:
+) -> tuple[set[str], dict[str, str], dict[str, str]]:
     """
-    Return a dict mapping ticker (uppercase) → zero-padded 10-digit CIK string
-    for all companies in the Russell 3000.
-
-    Results are cached in RUSSELL_CACHE_PATH for RUSSELL_CACHE_MAX_AGE_DAYS days.
-    Pass force_refresh=True to bypass the cache.
+    Download / load from cache the iShares IWV (Russell 3000) constituent list.
+    Returns (cik_set, ticker_from_cik, {}).
     """
     if not force_refresh and _cache_is_fresh():
-        return _read_cache()
+        mapping = _read_cache()          # {ticker: padded_cik}
+    else:
+        _log(progress_cb, "Downloading Russell 3000 holdings from iShares IWV…")
+        russell_tickers = _fetch_russell_tickers()
+        _log(progress_cb, "Downloading SEC company → CIK map…")
+        cik_map = _fetch_sec_cik_map()
+        _log(progress_cb, "Merging and caching…")
+        mapping = _merge(russell_tickers, cik_map)
+        _write_cache(mapping)
 
-    _log(progress_cb, "Downloading Russell 3000 holdings from iShares IWV\u2026")
-    russell_tickers = _fetch_russell_tickers()
+    cik_set: set[str] = set()
+    ticker_from_cik: dict[str, str] = {}
+    for ticker, padded in mapping.items():
+        norm = str(int(padded))
+        cik_set.add(norm)
+        ticker_from_cik[norm] = ticker
 
-    _log(progress_cb, "Downloading SEC company \u2192 CIK map\u2026")
-    cik_map = _fetch_sec_cik_map()
-
-    _log(progress_cb, "Merging ticker lists and writing cache\u2026")
-    mapping = _merge(russell_tickers, cik_map)
-    _write_cache(mapping)
-
-    return mapping
+    return cik_set, ticker_from_cik, {}
 
 
 def cache_info() -> dict:
@@ -132,8 +185,8 @@ def cache_info() -> dict:
         "exists": True,
         "age_days": round(age_days, 1),
         "ticker_count": len(data.get("mapping", {})),
-        "updated_at": datetime.fromtimestamp(ts, tz=timezone.utc).strftime(
-            "%Y-%m-%d %H:%M UTC"
+        "updated_at": datetime.fromtimestamp(ts, tz=_PH_TZ).strftime(
+            "%Y-%m-%d %H:%M PHT"
         ),
     }
 
@@ -167,42 +220,29 @@ def _write_cache(mapping: dict[str, str]) -> None:
 
 
 def _fetch_russell_tickers() -> set[str]:
-    """Download iShares IWV holdings and return a set of uppercase tickers."""
     headers = {"User-Agent": SEC_USER_AGENT}
     resp = requests.get(ISHARES_IWV_URL, headers=headers, timeout=30)
     resp.raise_for_status()
-
     lines = resp.text.splitlines()
-    # The CSV has fund metadata rows before the real column header.
-    # The real header row starts with "Ticker".
     try:
-        header_idx = next(
-            i for i, line in enumerate(lines) if line.startswith("Ticker")
-        )
+        header_idx = next(i for i, line in enumerate(lines) if line.startswith("Ticker"))
     except StopIteration:
         raise ValueError(
             "Could not find 'Ticker' header row in iShares IWV CSV. "
             "The file format may have changed."
         )
-
     df = pd.read_csv(io.StringIO("\n".join(lines[header_idx:])))
-
-    # Drop cash/futures/non-equity rows (Ticker is blank, "-", or "CASH")
     df = df[df["Ticker"].notna()]
     df = df[~df["Ticker"].str.strip().isin(["-", "CASH", ""])]
-
     return set(df["Ticker"].str.upper().str.strip())
 
 
 def _fetch_sec_cik_map() -> dict[str, str]:
-    """
-    Download SEC's company_tickers.json and return {TICKER: zero-padded CIK}.
-    """
+    """Return {TICKER: zero-padded-10-digit-CIK}."""
     headers = {"User-Agent": SEC_USER_AGENT}
     resp = requests.get(COMPANY_TICKERS_URL, headers=headers, timeout=30)
     resp.raise_for_status()
     raw = resp.json()
-    # Structure: {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "..."}, ...}
     return {
         entry["ticker"].upper(): str(entry["cik_str"]).zfill(10)
         for entry in raw.values()
@@ -210,7 +250,6 @@ def _fetch_sec_cik_map() -> dict[str, str]:
 
 
 def _merge(russell_tickers: set[str], cik_map: dict[str, str]) -> dict[str, str]:
-    """Inner-join Russell tickers with SEC CIK map."""
     mapping = {}
     missed = []
     for ticker in sorted(russell_tickers):
@@ -221,7 +260,7 @@ def _merge(russell_tickers: set[str], cik_map: dict[str, str]) -> dict[str, str]
             missed.append(ticker)
     if missed:
         print(
-            f"[russell] {len(missed)} tickers not found in SEC map "
-            f"(likely non-equity/cash rows): {missed[:10]}{'\u2026' if len(missed)>10 else ''}"
+            f"[russell] {len(missed)} tickers not in SEC map "
+            f"(non-equity rows): {missed[:10]}{'…' if len(missed) > 10 else ''}"
         )
     return mapping

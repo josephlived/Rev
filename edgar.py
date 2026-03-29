@@ -32,8 +32,8 @@ _ANNUAL_SPECIAL_RE = re.compile(
     r"annual\s+and\s+special\s+meeting|special\s+and\s+annual\s+meeting",
     re.IGNORECASE,
 )
-_ANNUAL_RE = re.compile(r"\bannual\s+meeting\b", re.IGNORECASE)
-_SPECIAL_RE = re.compile(r"\bspecial\s+meeting\b", re.IGNORECASE)
+_ANNUAL_RE = re.compile(r"\bannual\s+(?:general\s+)?meeting\b", re.IGNORECASE)
+_SPECIAL_RE = re.compile(r"\bspecial\s+(?:general\s+)?meeting\b", re.IGNORECASE)
 
 # Matches "May 12, 2026", "June 3, 2026", etc.
 _MONTH_DATE_RE = re.compile(
@@ -162,17 +162,14 @@ def filter_filings(
 
 def enrich_with_ticker(
     df: pd.DataFrame,
-    ticker_cik_map: dict[str, str],
-    ticker_index_map: dict[str, str] | None = None,
+    ticker_from_cik: dict[str, str],
+    index_from_cik: dict[str, str] | None = None,
 ) -> pd.DataFrame:
-    """Add 'ticker' and 'index_name' columns by reverse-mapping CIK → ticker."""
-    cik_ticker = {str(int(v)): k for k, v in ticker_cik_map.items()}
+    """Add 'ticker' and 'index_name' columns using CIK-keyed lookup dicts."""
     df = df.copy()
-    df["ticker"] = df["cik"].apply(lambda c: cik_ticker.get(str(int(c)), ""))
-    if ticker_index_map:
-        df["index_name"] = df["ticker"].apply(lambda t: ticker_index_map.get(t, ""))
-    else:
-        df["index_name"] = ""
+    norm = df["cik"].apply(lambda c: str(int(c)))
+    df["ticker"] = norm.map(ticker_from_cik or {}).fillna("")
+    df["index_name"] = norm.map(index_from_cik or {}).fillna("")
     return df
 
 
@@ -323,13 +320,13 @@ def _parse_meeting_info(html_text: str) -> dict:
 def _extract_annual_meeting_date(text: str) -> str:
     m = _MEETING_DATE_CONTEXT_RE.search(text)
     if m:
-        return m.group(1).strip()
+        return m.group(1).strip().title()
 
     annual_match = _ANNUAL_RE.search(text)
     if annual_match:
         snippet = text[annual_match.start(): annual_match.start() + 400]
         m2 = _MONTH_DATE_RE.search(snippet)
         if m2:
-            return m2.group(0).strip()
+            return m2.group(0).strip().title()
 
     return ""
