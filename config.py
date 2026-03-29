@@ -30,7 +30,7 @@ RUSSELL_CACHE_PATH = os.path.join(CACHE_DIR, "russell3000_ciks.json")
 RUSSELL_CACHE_MAX_AGE_DAYS = 7
 
 # ── SEC request headers (required by SEC; swap for real contact info) ─────────
-SEC_USER_AGENT = "SEC Filing Collator sec-collator@example.com"
+SEC_USER_AGENT = "SEC Ledger sec-ledger@example.com"
 
 # ── Filing types to collate ───────────────────────────────────────────────────
 TARGET_FORMS = {"10-K", "10-K/A", "DEF 14A", "20-F", "40-F", "NT 10-K"}

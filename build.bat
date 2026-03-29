@@ -1,6 +1,6 @@
 @echo off
 echo ============================================
-echo  SEC Filing Collator — Windows Build Script
+echo  SEC Ledger — Windows Build Script
 echo ============================================
 echo.
 

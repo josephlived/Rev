@@ -2,7 +2,7 @@
 set -e
 
 echo "============================================"
-echo " SEC Filing Collator — Mac/Linux Build Script"
+echo " SEC Ledger — Mac/Linux Build Script"
 echo "============================================"
 echo
 

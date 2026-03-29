@@ -1,5 +1,5 @@
 """
-SEC Filing Collator — Streamlit app entry point.
+SEC Ledger — Streamlit app entry point.
 
 Run with:
     streamlit run app.py
@@ -33,12 +33,12 @@ def _build_display(df: pd.DataFrame) -> pd.DataFrame:
 
 # ── Page setup ────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SEC Filing Collator",
+    page_title="SEC Ledger",
     page_icon="📋",
     layout="wide",
 )
 
-st.title("📋 SEC Filing Collator — Russell 3000")
+st.title("📋 SEC Ledger")
 st.caption(
     "Collates 10-K · 10-K/A · DEF 14A · 20-F · 40-F · NT 10-K filings "
     "filed on a given date, filtered to Russell 3000 companies."
@@ -213,6 +213,12 @@ if fetch_btn:
     st.divider()
     st.subheader(f"Results for {filing_date}")
     st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    if def14a_count > 0:
+        st.caption(
+            "Meeting Date confidence: 🟢 High — date directly follows "
+            "'held on / scheduled for'  ·  🟡 Medium — nearest date found near keyword"
+        )
 
     csv_bytes = display_df.to_csv(index=False).encode("utf-8")
     st.download_button(
