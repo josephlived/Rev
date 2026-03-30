@@ -355,10 +355,14 @@ def _parse_with_claude(html_text: str, api_key: str) -> dict | None:
         client = _anthropic.Anthropic(api_key=api_key)
         msg = client.messages.create(
             model=_ANTHROPIC_MODEL,
-            max_tokens=64,
+            max_tokens=100,
             messages=[{"role": "user", "content": _CLAUDE_PROMPT + clean[:20_000]}],
         )
-        result = _json.loads(msg.content[0].text.strip())
+        raw = msg.content[0].text.strip()
+        # Strip markdown code fences if Claude wraps the response despite instructions
+        raw = re.sub(r"^```(?:json)?\s*\n?", "", raw)
+        raw = re.sub(r"\n?```$", "", raw).strip()
+        result = _json.loads(raw)
         mtype = result.get("meeting_type", "Other").strip()
         mdate = result.get("meeting_date", "").strip()
         if mtype not in {"Annual", "Special", "Annual + Special", "Other"}:
