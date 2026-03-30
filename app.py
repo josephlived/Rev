@@ -177,10 +177,24 @@ if fetch_btn:
     filtered_df = edgar.enrich_with_ticker(filtered_df, ticker_from_cik, index_from_cik)
 
     if filtered_df.empty:
+        type_matched = raw_df[raw_df["form_type"].isin(TARGET_FORMS)]
         st.info(
-            f"No filings of types {sorted(TARGET_FORMS)} found for "
-            f"{source_label} companies on {filing_date}."
+            f"No filings matched your constituent list for **{filing_date}**.\n\n"
+            f"- **{len(raw_df):,}** total filings found on this date\n"
+            f"- **{len(type_matched):,}** matched the target form types "
+            f"({', '.join(sorted(TARGET_FORMS))})\n"
+            f"- **0** of those had a CIK in your **{len(cik_set):,}**-company list"
         )
+        if not type_matched.empty:
+            st.caption(
+                "These filings matched the form types but were not in your constituent list — "
+                "check if any of these companies should be included:"
+            )
+            st.dataframe(
+                type_matched[["form_type", "company_name", "cik"]].reset_index(drop=True),
+                hide_index=True,
+                use_container_width=True,
+            )
         st.stop()
 
     # ── Step 4: Parse DEF 14A filings ─────────────────────────────────────────
