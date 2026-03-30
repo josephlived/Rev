@@ -48,15 +48,46 @@ st.caption(
 with st.sidebar:
     st.header("Settings")
 
-    filing_date = st.date_input(
-        "Filing Date",
-        value=datetime.date.today() - datetime.timedelta(days=1),
+    _yesterday = datetime.date.today() - datetime.timedelta(days=1)
+    date_range = st.date_input(
+        "Filing Date Range",
+        value=(_yesterday, _yesterday),
         min_value=datetime.date(1996, 1, 1),
         max_value=datetime.date.today(),
-        help="Date filings were submitted to SEC EDGAR.",
+        help="Pick a single day or drag to select a range. Weekends are skipped automatically.",
     )
 
-    fetch_btn = st.button("🔍 Fetch Filings", use_container_width=True, type="primary")
+    # Handle single date vs. range (Streamlit may return tuple mid-selection)
+    if isinstance(date_range, (list, tuple)):
+        if len(date_range) == 2:
+            start_date, end_date = date_range
+        else:
+            start_date = end_date = date_range[0]
+    else:
+        start_date = end_date = date_range
+
+    st.divider()
+
+    # ── Form type selector ────────────────────────────────────────────────────
+    st.subheader("Form Types")
+    selected_forms = st.multiselect(
+        "Select form types to collate",
+        options=sorted(TARGET_FORMS),
+        default=sorted(TARGET_FORMS),
+        help="Choose which filing types to include. Deselect any you don't need.",
+        label_visibility="collapsed",
+    )
+    if not selected_forms:
+        st.warning("Select at least one form type.")
+
+    selected_forms_set = set(selected_forms)
+
+    fetch_btn = st.button(
+        "🔍 Fetch Filings",
+        use_container_width=True,
+        type="primary",
+        disabled=not selected_forms,
+    )
 
     st.divider()
 
@@ -66,7 +97,7 @@ with st.sidebar:
         "Upload your Excel/CSV list",
         type=["xlsx", "xls", "csv"],
         help=(
-            "Upload a file with a 'Ticker' column and optionally an 'Index' "
+            "Upload a file with a 'CIK' or 'Ticker' column and optionally an 'Index' "
             "column (e.g. 'Russell 1000', 'S&P 500'). "
             "If no file is uploaded, the app uses the iShares IWV (Russell 3000) list."
         ),
@@ -155,34 +186,68 @@ if fetch_btn:
                 st.error(f"Could not load Russell 3000 list: {exc}")
                 st.stop()
 
-    # ── Step 2: Fetch EDGAR daily index ───────────────────────────────────────
-    with st.status(f"Fetching EDGAR daily index for {filing_date}…", expanded=False) as status:
-        try:
-            raw_df = edgar.fetch_daily_index(filing_date, session)
-            status.update(
-                label=f"✅ Daily index fetched — {len(raw_df):,} total filings",
-                state="complete",
-            )
-        except ValueError as exc:
+    # ── Step 2: Build list of weekdays in the date range ──────────────────────
+    dates_to_fetch = []
+    d = start_date
+    while d <= end_date:
+        if d.weekday() < 5:  # Mon–Fri only; EDGAR has no index on weekends
+            dates_to_fetch.append(d)
+        d += datetime.timedelta(days=1)
+
+    if not dates_to_fetch:
+        st.warning("The selected date range contains no weekdays. Please pick a range that includes at least one weekday.")
+        st.stop()
+
+    # ── Step 3: Fetch EDGAR daily index for each date ─────────────────────────
+    date_label = str(start_date) if start_date == end_date else f"{start_date} – {end_date}"
+
+    all_raw: list[pd.DataFrame] = []
+    skipped_dates: list[datetime.date] = []
+
+    fetch_label = (
+        f"Fetching EDGAR daily index for {date_label}…"
+        if len(dates_to_fetch) == 1
+        else f"Fetching EDGAR daily index ({len(dates_to_fetch)} days)…"
+    )
+    with st.status(fetch_label, expanded=False) as status:
+        for i, day in enumerate(dates_to_fetch, 1):
+            if len(dates_to_fetch) > 1:
+                status.update(label=f"Fetching {day} ({i}/{len(dates_to_fetch)})…")
+            try:
+                day_df = edgar.fetch_daily_index(day, session)
+                all_raw.append(day_df)
+            except ValueError:
+                skipped_dates.append(day)  # no index (holiday, etc.) — skip silently
+            except Exception as exc:
+                status.update(label="❌ Fetch error", state="error")
+                st.error(f"EDGAR fetch error on {day}: {exc}")
+                st.stop()
+
+        if not all_raw:
             status.update(label="⚠️ No filings found", state="error")
-            st.warning(str(exc))
-            st.stop()
-        except Exception as exc:
-            status.update(label="❌ Failed to fetch index", state="error")
-            st.error(f"EDGAR fetch error: {exc}")
+            st.warning(
+                f"No EDGAR filing index found for any date in the selected range ({date_label}). "
+                "This may be a holiday or market closure."
+            )
             st.stop()
 
-    # ── Step 3: Filter + enrich ───────────────────────────────────────────────
-    filtered_df = edgar.filter_filings(raw_df, cik_set)
+        raw_df = pd.concat(all_raw, ignore_index=True).drop_duplicates()
+        complete_label = f"✅ Daily index fetched — {len(raw_df):,} total filings"
+        if skipped_dates:
+            complete_label += f" ({len(skipped_dates)} date(s) skipped — no index)"
+        status.update(label=complete_label, state="complete")
+
+    # ── Step 4: Filter + enrich ───────────────────────────────────────────────
+    filtered_df = edgar.filter_filings(raw_df, cik_set, target_forms=selected_forms_set)
     filtered_df = edgar.enrich_with_ticker(filtered_df, ticker_from_cik, index_from_cik)
 
     if filtered_df.empty:
-        type_matched = raw_df[raw_df["form_type"].isin(TARGET_FORMS)]
+        type_matched = raw_df[raw_df["form_type"].isin(selected_forms_set)]
         st.info(
-            f"No filings matched your constituent list for **{filing_date}**.\n\n"
-            f"- **{len(raw_df):,}** total filings found on this date\n"
-            f"- **{len(type_matched):,}** matched the target form types "
-            f"({', '.join(sorted(TARGET_FORMS))})\n"
+            f"No filings matched your constituent list for **{date_label}**.\n\n"
+            f"- **{len(raw_df):,}** total filings found\n"
+            f"- **{len(type_matched):,}** matched the selected form types "
+            f"({', '.join(sorted(selected_forms_set))})\n"
             f"- **0** of those had a CIK in your **{len(cik_set):,}**-company list"
         )
         if not type_matched.empty:
@@ -197,7 +262,7 @@ if fetch_btn:
             )
         st.stop()
 
-    # ── Step 4: Parse DEF 14A filings ─────────────────────────────────────────
+    # ── Step 5: Parse DEF 14A filings ─────────────────────────────────────────
     def14a_count = (filtered_df["form_type"] == "DEF 14A").sum()
 
     if def14a_count > 0:
@@ -215,7 +280,7 @@ if fetch_btn:
         filtered_df["meeting_type"] = ""
         filtered_df["meeting_date"] = ""
 
-    # ── Step 5: Display ───────────────────────────────────────────────────────
+    # ── Step 6: Display ───────────────────────────────────────────────────────
     display_df = _build_display(filtered_df)
 
     form_counts = filtered_df["form_type"].value_counts().to_dict()
@@ -225,13 +290,18 @@ if fetch_btn:
         cols[i].metric(form, count)
 
     st.divider()
-    st.subheader(f"Results for {filing_date}")
+    st.subheader(f"Results for {date_label}")
     st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    if start_date == end_date:
+        csv_filename = f"sec_filings_{start_date}.csv"
+    else:
+        csv_filename = f"sec_filings_{start_date}_to_{end_date}.csv"
 
     csv_bytes = display_df.to_csv(index=False).encode("utf-8")
     st.download_button(
         label="⬇️ Download CSV",
         data=csv_bytes,
-        file_name=f"sec_filings_{filing_date}.csv",
+        file_name=csv_filename,
         mime="text/csv",
     )
