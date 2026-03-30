@@ -18,7 +18,7 @@ from config import TARGET_FORMS
 def _build_display(df: pd.DataFrame) -> pd.DataFrame:
     """Reorder and rename columns for the results table."""
     out = pd.DataFrame()
-    out["Date Filed"] = df["date_filed"]
+    out["Date Filed"] = pd.to_datetime(df["date_filed"], errors="coerce").dt.strftime("%-m/%-d/%y")
     out["Form Type"] = df["form_type"]
     out["Company"] = df["company_name"]
     out["Ticker"] = df["ticker"]
