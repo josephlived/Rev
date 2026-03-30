@@ -208,6 +208,7 @@ def parse_def14a_filings(
     df = df.copy()
     df["meeting_type"] = ""
     df["meeting_date"] = ""
+    df["claude_error"] = ""
 
     def14a_mask = df["form_type"] == "DEF 14A"
     total = def14a_mask.sum()
@@ -224,7 +225,12 @@ def parse_def14a_filings(
         try:
             html = _fetch_def14a_text(filename, row["cik"], session)
             if use_claude:
-                info = _parse_with_claude(html, api_key) or _parse_meeting_info(html)
+                claude_result, claude_err = _parse_with_claude(html, api_key)
+                if claude_result:
+                    info = claude_result
+                else:
+                    df.at[idx, "claude_error"] = claude_err or "unknown error"
+                    info = _parse_meeting_info(html)
             else:
                 info = _parse_meeting_info(html)
             df.at[idx, "meeting_type"] = info["meeting_type"]
@@ -340,10 +346,30 @@ def _parse_meeting_info(html_text: str) -> dict:
     return {"meeting_type": meeting_type, "meeting_date": meeting_date}
 
 
-def _parse_with_claude(html_text: str, api_key: str) -> dict | None:
+def test_api_key(api_key: str) -> str | None:
+    """
+    Validate an Anthropic API key by making a minimal real API call.
+    Returns None if the key is valid, or an error string if it is not.
+    """
+    if not _ANTHROPIC_AVAILABLE:
+        return "anthropic package not installed"
+    try:
+        client = _anthropic.Anthropic(api_key=api_key)
+        client.messages.create(
+            model=_ANTHROPIC_MODEL,
+            max_tokens=1,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        return None
+    except Exception as exc:
+        return str(exc)
+
+
+def _parse_with_claude(html_text: str, api_key: str) -> tuple[dict | None, str | None]:
     """
     Use Claude Haiku 3 to extract meeting_type and meeting_date from DEF 14A
-    text.  Returns None on any error so the caller can fall back to regex.
+    text.  Returns (result, None) on success or (None, error_str) on failure
+    so the caller can fall back to regex and surface the error.
     """
     try:
         try:
@@ -367,9 +393,9 @@ def _parse_with_claude(html_text: str, api_key: str) -> dict | None:
         mdate = result.get("meeting_date", "").strip()
         if mtype not in {"Annual", "Special", "Annual + Special", "Other"}:
             mtype = "Other"
-        return {"meeting_type": mtype, "meeting_date": mdate}
-    except Exception:
-        return None  # caller falls back to regex
+        return {"meeting_type": mtype, "meeting_date": mdate}, None
+    except Exception as exc:
+        return None, str(exc)
 
 
 def _extract_annual_meeting_date(text: str) -> str:
