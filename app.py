@@ -5,6 +5,7 @@ Run with:
     streamlit run app.py
 """
 import datetime
+import os
 
 import pandas as pd
 import requests
@@ -130,6 +131,19 @@ with st.sidebar:
         )
     else:
         refresh_btn = False
+
+    st.divider()
+
+    # ── AI meeting date parsing ───────────────────────────────────────────────
+    st.subheader("AI Parsing")
+    _api_key = st.secrets.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
+    if _api_key:
+        st.success("✅ Claude Haiku 3 active")
+    else:
+        st.caption(
+            "No API key found. Add `ANTHROPIC_API_KEY` to Streamlit secrets "
+            "for AI-powered meeting date parsing."
+        )
 
     st.divider()
     st.caption("Data sources: SEC EDGAR · iShares IWV ETF\n\nRate-limited to ≤8 req/s per SEC guidelines.")
@@ -274,7 +288,8 @@ if fetch_btn:
             progress_bar.progress(pct, text=f"{msg} ({current}/{total})")
 
         filtered_df = edgar.parse_def14a_filings(
-            filtered_df, session, progress_cb=_def14a_progress
+            filtered_df, session, progress_cb=_def14a_progress,
+            api_key=_api_key or None,
         )
         progress_bar.empty()
     else:
