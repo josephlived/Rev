@@ -49,22 +49,22 @@ with st.sidebar:
     st.header("Settings")
 
     _yesterday = datetime.date.today() - datetime.timedelta(days=1)
-    date_range = st.date_input(
-        "Filing Date Range",
-        value=(_yesterday, _yesterday),
+    _col1, _col2 = st.columns(2)
+    start_date = _col1.date_input(
+        "From",
+        value=_yesterday,
         min_value=datetime.date(1996, 1, 1),
         max_value=datetime.date.today(),
-        help="Pick a single day or drag to select a range. Weekends are skipped automatically.",
     )
-
-    # Handle single date vs. range (Streamlit may return tuple mid-selection)
-    if isinstance(date_range, (list, tuple)):
-        if len(date_range) == 2:
-            start_date, end_date = date_range
-        else:
-            start_date = end_date = date_range[0]
-    else:
-        start_date = end_date = date_range
+    end_date = _col2.date_input(
+        "To",
+        value=_yesterday,
+        min_value=datetime.date(1996, 1, 1),
+        max_value=datetime.date.today(),
+    )
+    if end_date < start_date:
+        st.warning("'To' date must be on or after 'From' date.")
+        end_date = start_date
 
     st.divider()
 
