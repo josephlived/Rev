@@ -40,7 +40,7 @@ st.set_page_config(
 
 st.title("📋 SEC Ledger")
 st.caption(
-    "Collates 10-K · 10-K/A · DEF 14A · 20-F · 40-F · NT 10-K filings "
+    "Collates 10-K · 10-K/A · 10-KT · DEF 14A · 20-F · 40-F · NT 10-K filings "
     "filed on a given date, filtered to Russell 3000 companies."
 )
 
