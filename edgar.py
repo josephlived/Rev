@@ -8,10 +8,31 @@ Covers:
   - Parsing meeting type and date from proxy statement text
 """
 import io
+import json as _json
 import re
 import time
 from datetime import date
 from typing import Callable
+
+try:
+    import anthropic as _anthropic
+    _ANTHROPIC_AVAILABLE = True
+except ImportError:
+    _ANTHROPIC_AVAILABLE = False
+
+_ANTHROPIC_MODEL = "claude-3-haiku-20240307"
+
+_CLAUDE_PROMPT = """\
+You are parsing a SEC DEF 14A proxy statement. Extract exactly two fields:
+
+1. meeting_type — choose exactly one of: "Annual", "Special", "Annual + Special", "Other"
+2. meeting_date — the shareholder meeting date as "Month D, YYYY" (e.g. "May 14, 2026"). Use "" if not found.
+
+Reply with JSON only, no explanation or extra text:
+{"meeting_type": "...", "meeting_date": "..."}
+
+Proxy statement text:
+"""
 
 import pandas as pd
 import requests
@@ -102,9 +123,6 @@ def fetch_daily_index(filing_date: date, session: requests.Session) -> pd.DataFr
             ) from exc
         raise
 
-    # The .idx file has a variable-length header (metadata + blanks + two-line
-    # column header + dashed separator).  Locate the separator dynamically so
-    # we never depend on a hardcoded line count.
     lines = resp.text.splitlines()
     sep_idx = next(
         (i for i, line in enumerate(lines) if line.startswith("---")), None
@@ -177,11 +195,15 @@ def parse_def14a_filings(
     df: pd.DataFrame,
     session: requests.Session,
     progress_cb: Callable[[str, int, int], None] | None = None,
+    api_key: str | None = None,
 ) -> pd.DataFrame:
     """
     For every DEF 14A row in df, fetch the primary document and extract
     meeting_type and meeting_date.  Returns df with those two columns added
     (empty strings for non-DEF14A rows).
+
+    If api_key is provided and the anthropic package is installed, uses
+    Claude Haiku 3 for parsing; falls back to regex on any API error.
     """
     df = df.copy()
     df["meeting_type"] = ""
@@ -189,6 +211,7 @@ def parse_def14a_filings(
 
     def14a_mask = df["form_type"] == "DEF 14A"
     total = def14a_mask.sum()
+    use_claude = bool(api_key and _ANTHROPIC_AVAILABLE)
 
     for i, idx in enumerate(df[def14a_mask].index):
         row = df.loc[idx]
@@ -200,7 +223,10 @@ def parse_def14a_filings(
 
         try:
             html = _fetch_def14a_text(filename, row["cik"], session)
-            info = _parse_meeting_info(html)
+            if use_claude:
+                info = _parse_with_claude(html, api_key) or _parse_meeting_info(html)
+            else:
+                info = _parse_meeting_info(html)
             df.at[idx, "meeting_type"] = info["meeting_type"]
             df.at[idx, "meeting_date"] = info["meeting_date"]
         except Exception as exc:
@@ -241,7 +267,6 @@ def _fetch_def14a_text(filename: str, cik: str, session: requests.Session) -> st
 def _find_primary_doc_url(
     soup: BeautifulSoup, cik: str, accession_nodash: str
 ) -> str | None:
-    # Index table columns: Seq | Description | Document | Type | Size
     for row in soup.find_all("tr"):
         cells = row.find_all("td")
         if len(cells) < 4:
@@ -251,12 +276,10 @@ def _find_primary_doc_url(
             link = cells[2].find("a")
             if link and link.get("href"):
                 href = link["href"]
-                # Unwrap inline XBRL viewer: /ix?doc=/Archives/edgar/.../file.htm
                 if "/ix?doc=" in href:
                     href = href.split("doc=", 1)[1]
                 if href.startswith("http"):
                     return href
-                # Root-relative path e.g. /Archives/edgar/data/.../file.htm
                 return "https://www.sec.gov" + href
     return None
 
@@ -315,6 +338,34 @@ def _parse_meeting_info(html_text: str) -> dict:
         meeting_date = _extract_annual_meeting_date(text)
 
     return {"meeting_type": meeting_type, "meeting_date": meeting_date}
+
+
+def _parse_with_claude(html_text: str, api_key: str) -> dict | None:
+    """
+    Use Claude Haiku 3 to extract meeting_type and meeting_date from DEF 14A
+    text.  Returns None on any error so the caller can fall back to regex.
+    """
+    try:
+        try:
+            clean = BeautifulSoup(html_text, "lxml").get_text(" ", strip=True)
+        except Exception:
+            clean = re.sub(r"<[^>]+>", " ", html_text)
+        clean = re.sub(r"\s+", " ", clean)
+
+        client = _anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model=_ANTHROPIC_MODEL,
+            max_tokens=64,
+            messages=[{"role": "user", "content": _CLAUDE_PROMPT + clean[:20_000]}],
+        )
+        result = _json.loads(msg.content[0].text.strip())
+        mtype = result.get("meeting_type", "Other").strip()
+        mdate = result.get("meeting_date", "").strip()
+        if mtype not in {"Annual", "Special", "Annual + Special", "Other"}:
+            mtype = "Other"
+        return {"meeting_type": mtype, "meeting_date": mdate}
+    except Exception:
+        return None  # caller falls back to regex
 
 
 def _extract_annual_meeting_date(text: str) -> str:
