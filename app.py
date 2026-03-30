@@ -138,7 +138,12 @@ with st.sidebar:
     st.subheader("AI Parsing")
     _api_key = st.secrets.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
     if _api_key:
-        st.success("✅ Claude Haiku 3 active")
+        _key_error = edgar.test_api_key(_api_key)
+        if _key_error:
+            st.error(f"Claude API key error: {_key_error}")
+            _api_key = ""
+        else:
+            st.success("✅ Claude Haiku 3 active")
     else:
         st.caption(
             "No API key found. Add `ANTHROPIC_API_KEY` to Streamlit secrets "
@@ -292,6 +297,15 @@ if fetch_btn:
             api_key=_api_key or None,
         )
         progress_bar.empty()
+        if _api_key:
+            errors = filtered_df.loc[
+                filtered_df["claude_error"].str.len() > 0, "claude_error"
+            ]
+            if not errors.empty:
+                st.warning(
+                    f"Claude API failed on {len(errors)} filing(s), fell back to regex. "
+                    f"First error: {errors.iloc[0]}"
+                )
     else:
         filtered_df["meeting_type"] = ""
         filtered_df["meeting_date"] = ""
