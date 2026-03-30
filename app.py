@@ -143,7 +143,7 @@ with st.sidebar:
             st.error(f"Claude API key error: {_key_error}")
             _api_key = ""
         else:
-            st.success("✅ Claude Haiku 3 active")
+            st.success("✅ Claude Haiku 4.5 active")
     else:
         st.caption(
             "No API key found. Add `ANTHROPIC_API_KEY` to Streamlit secrets "
