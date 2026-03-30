@@ -20,12 +20,12 @@ try:
 except ImportError:
     _ANTHROPIC_AVAILABLE = False
 
-_ANTHROPIC_MODEL = "claude-3-haiku-20240307"
+_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 
 _CLAUDE_PROMPT = """\
 You are parsing a SEC DEF 14A proxy statement. Extract exactly two fields:
 
-1. meeting_type — choose exactly one of: "Annual", "Special", "Annual + Special", "Other"
+1. meeting_type — choose exactly one of: "Annual", "Special", "Annual + Special", "Extraordinary", "Other"
 2. meeting_date — the shareholder meeting date as "Month D, YYYY" (e.g. "May 14, 2026"). Use "" if not found.
 
 Reply with JSON only, no explanation or extra text:
@@ -55,6 +55,9 @@ _ANNUAL_SPECIAL_RE = re.compile(
 )
 _ANNUAL_RE = re.compile(r"\bannual\s+(?:general\s+)?meeting\b", re.IGNORECASE)
 _SPECIAL_RE = re.compile(r"\bspecial\s+(?:general\s+)?meeting\b", re.IGNORECASE)
+_EXTRAORDINARY_RE = re.compile(
+    r"\bextraordinary\s+(?:general\s+)?meeting\b", re.IGNORECASE
+)
 
 # Matches "May 12, 2026", "June 3, 2026", etc.
 _MONTH_DATE_RE = re.compile(
@@ -329,18 +332,21 @@ def _parse_meeting_info(html_text: str) -> dict:
     has_annual_special = bool(_ANNUAL_SPECIAL_RE.search(text))
     has_annual = bool(_ANNUAL_RE.search(text))
     has_special = bool(_SPECIAL_RE.search(text))
+    has_extraordinary = bool(_EXTRAORDINARY_RE.search(text))
 
     if has_annual_special or (has_annual and has_special):
         meeting_type = "Annual + Special"
     elif has_annual:
         meeting_type = "Annual"
+    elif has_extraordinary:
+        meeting_type = "Extraordinary"
     elif has_special:
         meeting_type = "Special"
     else:
         meeting_type = "Other"
 
     meeting_date = ""
-    if "Annual" in meeting_type:
+    if "Annual" in meeting_type or meeting_type == "Extraordinary":
         meeting_date = _extract_annual_meeting_date(text)
 
     return {"meeting_type": meeting_type, "meeting_date": meeting_date}
@@ -391,7 +397,7 @@ def _parse_with_claude(html_text: str, api_key: str) -> tuple[dict | None, str |
         result = _json.loads(raw)
         mtype = result.get("meeting_type", "Other").strip()
         mdate = result.get("meeting_date", "").strip()
-        if mtype not in {"Annual", "Special", "Annual + Special", "Other"}:
+        if mtype not in {"Annual", "Special", "Annual + Special", "Extraordinary", "Other"}:
             mtype = "Other"
         return {"meeting_type": mtype, "meeting_date": mdate}, None
     except Exception as exc:
