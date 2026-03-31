@@ -336,7 +336,10 @@ def parse_def14a_filings(
                     method = "api"
                 else:
                     df.at[idx, "claude_error"] = api_invalid_reason or claude_err or "unknown error"
-                    info = {"meeting_type": claude_result.get("meeting_type", ""), "meeting_date": ""}
+                    info = {
+                        "meeting_type": claude_result.get("meeting_type", "") if claude_result else "",
+                        "meeting_date": "",
+                    }
                     method = "api-rejected"
             else:
                 if _should_fallback_to_api(regex_info, filing_date):
@@ -622,10 +625,14 @@ def _find_best_claude_anchor(clean_text: str) -> int | None:
 
 
 def _parse_filing_date(raw_date: str) -> date | None:
-    try:
-        return datetime.strptime(str(raw_date).strip(), "%Y-%m-%d").date()
-    except ValueError:
+    if not raw_date:
         return None
+    for fmt in ("%Y-%m-%d", "%Y%m%d"):
+        try:
+            return datetime.strptime(str(raw_date).strip(), fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 def _parse_meeting_date(raw_date: str) -> date | None:

@@ -184,6 +184,13 @@ def _mode_uses_api(parsing_mode: str) -> bool:
     return parsing_mode in {edgar.PARSING_MODE_API, edgar.PARSING_MODE_HYBRID}
 
 
+def _get_cached_api_validation(api_key: str) -> str | None:
+    cache = st.session_state.setdefault("anthropic_key_validation", {})
+    if api_key not in cache:
+        cache[api_key] = edgar.test_api_key(api_key)
+    return cache[api_key]
+
+
 st.set_page_config(
     page_title="SEC Ledger",
     page_icon="📋",
@@ -259,7 +266,11 @@ with st.sidebar:
         "Fetch Filings",
         use_container_width=True,
         type="primary",
-        disabled=not selected_forms or (index_source == "Upload .idx file" and idx_file is None),
+        disabled=(
+            not selected_forms
+            or (index_source == "Upload .idx file" and idx_file is None)
+            or (parsing_mode == edgar.PARSING_MODE_API and not api_available)
+        ),
     )
 
     st.divider()
@@ -319,7 +330,7 @@ with st.sidebar:
     if _mode_uses_api(parsing_mode):
         api_key = _get_anthropic_api_key()
         if api_key:
-            key_error = edgar.test_api_key(api_key)
+            key_error = _get_cached_api_validation(api_key)
             if key_error:
                 st.error(f"Claude API key error: {key_error}")
                 api_key = ""
@@ -355,6 +366,10 @@ if refresh_btn:
     st.rerun()
 
 if fetch_btn:
+    if parsing_mode == edgar.PARSING_MODE_API and not api_available:
+        st.error("API Parsing requires a valid Anthropic API key before fetching can start.")
+        st.stop()
+
     session = requests.Session()
 
     if uploaded_file:
