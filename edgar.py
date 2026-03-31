@@ -24,6 +24,10 @@ PARSING_MODE_REGEX = "Regex Parsing"
 PARSING_MODE_API = "API Parsing"
 PARSING_MODE_HYBRID = "Hybrid"
 PARSING_MODES = [PARSING_MODE_REGEX, PARSING_MODE_API, PARSING_MODE_HYBRID]
+_CLAUDE_SNIPPET_TOTAL_CHARS = 5_000
+_CLAUDE_SNIPPET_BEFORE_CHARS = 2_250
+_CLAUDE_SNIPPET_AFTER_CHARS = 2_750
+_CLAUDE_FALLBACK_CHARS = 12_000
 
 _CLAUDE_PROMPT = """\
 You are parsing a SEC DEF 14A proxy statement. Extract exactly two fields:
@@ -78,6 +82,18 @@ _MEETING_DATE_CONTEXT_RE = re.compile(
     r"\.?\s+\d{1,2},?\s+\d{4})",
     re.IGNORECASE,
 )
+
+_CLAUDE_SNIPPET_PATTERNS = [
+    re.compile(r"annual\s+and\s+special\s+meeting", re.IGNORECASE),
+    re.compile(r"special\s+and\s+annual\s+meeting", re.IGNORECASE),
+    re.compile(r"notice\s+of\s+annual\s+meeting", re.IGNORECASE),
+    re.compile(r"notice\s+of\s+special\s+meeting", re.IGNORECASE),
+    re.compile(r"annual\s+meeting", re.IGNORECASE),
+    re.compile(r"special\s+meeting", re.IGNORECASE),
+    re.compile(r"extraordinary\s+meeting", re.IGNORECASE),
+    re.compile(r"date,\s*time\s+and\s+place", re.IGNORECASE),
+    re.compile(r"proxy\s+statement", re.IGNORECASE),
+]
 
 _IDX_TAIL_RE = re.compile(
     r"^(?P<company_name>.*?)\s+"
@@ -526,12 +542,13 @@ def _parse_with_claude(html_text: str, api_key: str) -> tuple[dict | None, str |
         except Exception:
             clean = re.sub(r"<[^>]+>", " ", html_text)
         clean = re.sub(r"\s+", " ", clean)
+        snippet = _build_claude_snippet(clean)
 
         client = _anthropic.Anthropic(api_key=api_key)
         msg = client.messages.create(
             model=_ANTHROPIC_MODEL,
             max_tokens=100,
-            messages=[{"role": "user", "content": _CLAUDE_PROMPT + clean[:5_000]}],
+            messages=[{"role": "user", "content": _CLAUDE_PROMPT + snippet}],
         )
         raw = msg.content[0].text.strip()
         # Strip markdown code fences if Claude wraps the response despite instructions
@@ -564,6 +581,38 @@ def _extract_annual_meeting_date(text: str) -> str:
             return m2.group(0).strip().title()
 
     return ""
+
+
+def _build_claude_snippet(clean_text: str) -> str:
+    if not clean_text:
+        return ""
+
+    hit_index = _find_best_claude_anchor(clean_text)
+    if hit_index is None:
+        return clean_text[:_CLAUDE_FALLBACK_CHARS]
+
+    start = max(0, hit_index - _CLAUDE_SNIPPET_BEFORE_CHARS)
+    end = min(len(clean_text), hit_index + _CLAUDE_SNIPPET_AFTER_CHARS)
+
+    snippet = clean_text[start:end]
+    if len(snippet) < _CLAUDE_SNIPPET_TOTAL_CHARS:
+        needed = _CLAUDE_SNIPPET_TOTAL_CHARS - len(snippet)
+        extra_after = min(needed, len(clean_text) - end)
+        end += extra_after
+        needed -= extra_after
+        if needed > 0:
+            start = max(0, start - needed)
+        snippet = clean_text[start:end]
+
+    return snippet
+
+
+def _find_best_claude_anchor(clean_text: str) -> int | None:
+    for pattern in _CLAUDE_SNIPPET_PATTERNS:
+        match = pattern.search(clean_text)
+        if match:
+            return match.start()
+    return None
 
 
 def _parse_filing_date(raw_date: str) -> date | None:
