@@ -262,17 +262,6 @@ with st.sidebar:
 
     selected_forms_set = set(selected_forms)
 
-    fetch_btn = st.button(
-        "Fetch Filings",
-        use_container_width=True,
-        type="primary",
-        disabled=(
-            not selected_forms
-            or (index_source == "Upload .idx file" and idx_file is None)
-            or (parsing_mode == edgar.PARSING_MODE_API and not api_available)
-        ),
-    )
-
     st.divider()
 
     st.subheader("Constituent List")
@@ -348,6 +337,18 @@ with st.sidebar:
             st.info("Hybrid is selected, but API fallback is unavailable, so DEF 14A parsing will run regex-only.")
     else:
         st.caption("Regex Parsing is selected. No API calls will be made.")
+
+    st.divider()
+    fetch_btn = st.button(
+        "Fetch Filings",
+        use_container_width=True,
+        type="primary",
+        disabled=(
+            not selected_forms
+            or (index_source == "Upload .idx file" and idx_file is None)
+            or (parsing_mode == edgar.PARSING_MODE_API and not api_available)
+        ),
+    )
 
     st.divider()
     st.caption("Data sources: SEC EDGAR and iShares IWV ETF\n\nRate-limited to <=8 req/s per SEC guidelines.")
