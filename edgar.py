@@ -330,23 +330,29 @@ def parse_def14a_filings(
                 method = "regex"
             elif parsing_mode == PARSING_MODE_API:
                 claude_result, claude_err = _parse_with_claude(html, api_key)
-                if claude_result:
+                api_invalid_reason = _get_invalid_meeting_reason(claude_result, filing_date)
+                if claude_result and api_invalid_reason is None:
                     info = claude_result
                     method = "api"
                 else:
-                    df.at[idx, "claude_error"] = claude_err or "unknown error"
-                    info = regex_info
-                    method = "regex-fallback"
+                    df.at[idx, "claude_error"] = api_invalid_reason or claude_err or "unknown error"
+                    info = {"meeting_type": claude_result.get("meeting_type", ""), "meeting_date": ""}
+                    method = "api-rejected"
             else:
                 if _should_fallback_to_api(regex_info, filing_date):
                     claude_result, claude_err = _parse_with_claude(html, api_key)
-                    if claude_result:
+                    api_invalid_reason = _get_invalid_meeting_reason(claude_result, filing_date)
+                    if claude_result and api_invalid_reason is None:
                         info = claude_result
                         method = "api-fallback"
                     else:
-                        df.at[idx, "claude_error"] = claude_err or "unknown error"
-                        info = regex_info
-                        method = "regex-fallback"
+                        df.at[idx, "claude_error"] = api_invalid_reason or claude_err or "unknown error"
+                        if _is_valid_meeting_result(regex_info, filing_date):
+                            info = regex_info
+                            method = "regex-fallback"
+                        else:
+                            info = {"meeting_type": regex_info.get("meeting_type", ""), "meeting_date": ""}
+                            method = "unresolved"
                 else:
                     info = regex_info
                     method = "regex"
@@ -637,15 +643,29 @@ def _should_fallback_to_api(regex_info: dict, filing_date: date | None) -> bool:
     if regex_info.get("type_is_ambiguous"):
         return True
 
-    meeting_date_raw = regex_info.get("meeting_date", "").strip()
+    return not _is_valid_meeting_result(regex_info, filing_date)
+
+
+def _is_valid_meeting_result(info: dict | None, filing_date: date | None) -> bool:
+    return _get_invalid_meeting_reason(info, filing_date) is None
+
+
+def _get_invalid_meeting_reason(info: dict | None, filing_date: date | None) -> str | None:
+    if not info:
+        return "missing parsed meeting result"
+
+    meeting_date_raw = str(info.get("meeting_date", "")).strip()
     if not meeting_date_raw:
-        return True
+        return "blank meeting date"
 
     if filing_date is None:
-        return False
+        return None
 
     meeting_date = _parse_meeting_date(meeting_date_raw)
     if meeting_date is None:
-        return True
+        return "unparsable meeting date"
 
-    return meeting_date < filing_date
+    if meeting_date < filing_date:
+        return "meeting date earlier than filing date"
+
+    return None
