@@ -33,7 +33,7 @@ RUSSELL_CACHE_MAX_AGE_DAYS = 7
 SEC_USER_AGENT = "Joseph Lumbihao jc4892790@gmail.com"
 
 # ── Filing types to collate ───────────────────────────────────────────────────
-TARGET_FORMS = {"10-K", "10-K/A", "10-KT", "DEF 14A", "20-F", "40-F", "NT 10-K", "DEF 14C", "DEF 14M"}
+TARGET_FORMS = {"10-K", "10-K/A", "10-KT", "DEF 14A", "20-F", "40-F", "NT 10-K"}
 
 # ── Rate limiting ─────────────────────────────────────────────────────────────
 RATE_LIMIT_RPS = 8  # stay safely under SEC's 10 req/s limit
