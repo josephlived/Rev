@@ -520,7 +520,7 @@ if fetch_btn:
             ]
             if not errors.empty:
                 st.warning(
-                    f"Claude API failed on {len(errors)} filing(s), fell back to regex. "
+                    f"Claude API failed on {len(errors)} filing(s); meeting date left blank. "
                     f"First error: {errors.iloc[0]}"
                 )
 
