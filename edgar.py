@@ -22,8 +22,7 @@ except ImportError:
 _ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 PARSING_MODE_REGEX = "Regex Parsing"
 PARSING_MODE_API = "API Parsing"
-PARSING_MODE_HYBRID = "Hybrid"
-PARSING_MODES = [PARSING_MODE_REGEX, PARSING_MODE_API, PARSING_MODE_HYBRID]
+PARSING_MODES = [PARSING_MODE_REGEX, PARSING_MODE_API]
 _CLAUDE_SNIPPET_TOTAL_CHARS = 5_000
 _CLAUDE_SNIPPET_BEFORE_CHARS = 2_250
 _CLAUDE_SNIPPET_AFTER_CHARS = 2_750
@@ -292,7 +291,7 @@ def parse_def14a_filings(
     df: pd.DataFrame,
     session: requests.Session,
     progress_cb: Callable[[str, int, int], None] | None = None,
-    parsing_mode: str = PARSING_MODE_HYBRID,
+    parsing_mode: str = PARSING_MODE_REGEX,
     api_key: str | None = None,
 ) -> pd.DataFrame:
     """
@@ -300,7 +299,7 @@ def parse_def14a_filings(
     meeting_type and meeting_date.  Returns df with those two columns added
     (empty strings for non-DEF14A rows).
 
-    Parsing mode controls whether regex, API, or hybrid fallback logic is used.
+    Parsing mode controls whether regex or API parsing is used.
     """
     df = df.copy()
     df["meeting_type"] = ""
@@ -328,7 +327,7 @@ def parse_def14a_filings(
             if parsing_mode == PARSING_MODE_REGEX or not api_enabled:
                 info = regex_info
                 method = "regex"
-            elif parsing_mode == PARSING_MODE_API:
+            else:
                 claude_result, claude_err = _parse_with_claude(html, api_key)
                 api_invalid_reason = _get_invalid_meeting_reason(claude_result, filing_date)
                 if claude_result and api_invalid_reason is None:
@@ -341,24 +340,6 @@ def parse_def14a_filings(
                         "meeting_date": "",
                     }
                     method = "api-rejected"
-            else:
-                if _should_fallback_to_api(regex_info, filing_date):
-                    claude_result, claude_err = _parse_with_claude(html, api_key)
-                    api_invalid_reason = _get_invalid_meeting_reason(claude_result, filing_date)
-                    if claude_result and api_invalid_reason is None:
-                        info = claude_result
-                        method = "api-fallback"
-                    else:
-                        df.at[idx, "claude_error"] = api_invalid_reason or claude_err or "unknown error"
-                        if _is_valid_meeting_result(regex_info, filing_date):
-                            info = regex_info
-                            method = "regex-fallback"
-                        else:
-                            info = {"meeting_type": regex_info.get("meeting_type", ""), "meeting_date": ""}
-                            method = "unresolved"
-                else:
-                    info = regex_info
-                    method = "regex"
             df.at[idx, "meeting_type"] = info["meeting_type"]
             df.at[idx, "meeting_date"] = info["meeting_date"]
             df.at[idx, "parsing_method"] = method
@@ -644,13 +625,6 @@ def _parse_meeting_date(raw_date: str) -> date | None:
         except ValueError:
             continue
     return None
-
-
-def _should_fallback_to_api(regex_info: dict, filing_date: date | None) -> bool:
-    if regex_info.get("type_is_ambiguous"):
-        return True
-
-    return not _is_valid_meeting_result(regex_info, filing_date)
 
 
 def _is_valid_meeting_result(info: dict | None, filing_date: date | None) -> bool:

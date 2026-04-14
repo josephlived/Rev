@@ -181,7 +181,7 @@ def _get_anthropic_api_key() -> str:
 
 
 def _mode_uses_api(parsing_mode: str) -> bool:
-    return parsing_mode in {edgar.PARSING_MODE_API, edgar.PARSING_MODE_HYBRID}
+    return parsing_mode == edgar.PARSING_MODE_API
 
 
 def _get_cached_api_validation(api_key: str) -> str | None:
@@ -308,7 +308,7 @@ with st.sidebar:
         options=edgar.PARSING_MODES,
         index=edgar.PARSING_MODES.index(edgar.PARSING_MODE_REGEX),
         label_visibility="collapsed",
-        help="Regex is cheapest, API uses Haiku for every DEF 14A, and Hybrid uses regex first with selective API fallback.",
+        help="Regex is cheapest; API uses Claude Haiku for every DEF 14A.",
     )
 
     api_key = ""
@@ -332,8 +332,6 @@ with st.sidebar:
 
         if parsing_mode == edgar.PARSING_MODE_API and not api_available:
             st.warning("API Parsing is selected, but no valid Anthropic key is available.")
-        elif parsing_mode == edgar.PARSING_MODE_HYBRID and not api_available:
-            st.info("Hybrid is selected, but API fallback is unavailable, so DEF 14A parsing will run regex-only.")
     else:
         st.caption("Regex Parsing is selected. No API calls will be made.")
 
@@ -527,8 +525,8 @@ if fetch_btn:
                 )
 
         if "parsing_method" in filtered_df.columns:
-            api_used = filtered_df["parsing_method"].isin(["api", "api-fallback"]).sum()
-            regex_used = filtered_df["parsing_method"].isin(["regex", "regex-fallback"]).sum()
+            api_used = (filtered_df["parsing_method"] == "api").sum()
+            regex_used = (filtered_df["parsing_method"] == "regex").sum()
             st.caption(
                 f"Meeting parsing mode: {parsing_mode}. Regex handled {regex_used} filing(s); API handled {api_used} filing(s)."
             )
