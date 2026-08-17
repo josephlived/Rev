@@ -434,6 +434,7 @@ if fetch_btn:
             st.stop()
 
         all_raw: list[pd.DataFrame] = []
+        blocked_dates: list[tuple[datetime.date, edgar.SecAccessError]] = []
         fetch_label = (
             f"Fetching EDGAR daily index for {date_label}..."
             if len(dates_to_fetch) == 1
@@ -448,31 +449,53 @@ if fetch_btn:
                 except ValueError:
                     skipped_dates.append(day)
                 except edgar.SecAccessError as exc:
-                    status.update(label="SEC access denied", state="error")
-                    st.error(
-                        f"SEC denied access to the daily index for {day} (HTTP {exc.status_code}). "
-                        "Retry later, or switch the sidebar source to `Upload .idx file` and drag in the SEC index manually."
-                    )
-                    st.caption(f"Blocked URL: {exc.url}")
-                    st.stop()
+                    # SEC serves HTTP 403 (not 404) for a daily index that does not
+                    # exist, which is exactly what a federal holiday looks like. Skip
+                    # the day and keep going instead of aborting the whole range; a
+                    # genuine block is caught after the loop, when no day succeeded.
+                    skipped_dates.append(day)
+                    blocked_dates.append((day, exc))
                 except Exception as exc:
                     status.update(label="Fetch error", state="error")
                     st.error(f"EDGAR fetch error on {day}: {exc}")
                     st.stop()
 
             if not all_raw:
-                status.update(label="No filings found", state="error")
-                st.warning(
-                    f"No EDGAR filing index found for any date in the selected range ({date_label}). "
-                    "This may be a holiday or market closure."
-                )
+                if blocked_dates:
+                    _, first_exc = blocked_dates[0]
+                    status.update(label="SEC access denied", state="error")
+                    st.error(
+                        f"SEC denied access to every daily index in the selected range "
+                        f"({date_label}, HTTP {first_exc.status_code}). "
+                        "Retry later, or switch the sidebar source to `Upload .idx file` "
+                        "and drag in the SEC index manually."
+                    )
+                    st.caption(f"Blocked URL: {first_exc.url}")
+                else:
+                    status.update(label="No filings found", state="error")
+                    st.warning(
+                        f"No EDGAR filing index found for any date in the selected range ({date_label}). "
+                        "This may be a holiday or market closure."
+                    )
                 st.stop()
 
             raw_df = pd.concat(all_raw, ignore_index=True).drop_duplicates()
             complete_label = f"Daily index fetched - {len(raw_df):,} total filings"
             if skipped_dates:
-                complete_label += f" ({len(skipped_dates)} date(s) skipped - no index)"
+                complete_label += f" ({len(skipped_dates)} date(s) skipped - no index published)"
             status.update(label=complete_label, state="complete")
+
+        if skipped_dates:
+            with st.expander(
+                f"{len(skipped_dates)} date(s) skipped - no EDGAR index published",
+                expanded=False,
+            ):
+                st.caption(
+                    "EDGAR publishes a daily index only on SEC business days. Weekends are "
+                    "excluded automatically; the dates below are federal holidays or days "
+                    "with no index file."
+                )
+                st.write("\n".join(f"- {day:%B %d, %Y} ({day:%A})" for day in skipped_dates))
 
     if "form_type_normalized" not in raw_df.columns:
         raw_df["form_type_normalized"] = raw_df["form_type"].map(edgar.normalize_form_type)
