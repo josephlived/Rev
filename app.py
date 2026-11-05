@@ -289,6 +289,17 @@ with st.sidebar:
                 f"Updated: {info['updated_at']}\n\n"
                 f"Age: {info['age_days']} days"
             )
+            if info["unmatched"]:
+                with st.expander(f"{len(info['unmatched'])} holdings skipped (no SEC match)"):
+                    st.caption(
+                        "These IWV holdings have no ticker in SEC's company list, "
+                        "usually rights, delisted shares, or companies that don't file with the SEC."
+                    )
+                    st.dataframe(
+                        pd.DataFrame(info["unmatched"], columns=["Ticker", "Name"]),
+                        hide_index=True,
+                        use_container_width=True,
+                    )
         else:
             st.warning("No cache - will download on first fetch.")
 
@@ -357,11 +368,20 @@ if refresh_btn:
         def _log(msg):
             status_box.info(msg)
 
-        russell.load_russell_ciks(force_refresh=True, progress_cb=_log)
+        try:
+            russell.load_russell_ciks(force_refresh=True, progress_cb=_log)
+            refresh_error = None
+        except Exception as exc:
+            refresh_error = exc
         status_box.empty()
 
-    st.success("Russell 3000 cache refreshed.")
-    st.rerun()
+    if refresh_error is None:
+        st.success("Russell 3000 cache refreshed.")
+        st.rerun()
+    st.error(
+        f"Could not refresh the Russell 3000 list: {refresh_error}\n\n"
+        "Your previously saved list (if any) has not been changed."
+    )
 
 if fetch_btn:
     if parsing_mode == edgar.PARSING_MODE_API and not api_available:
@@ -369,12 +389,16 @@ if fetch_btn:
         st.stop()
 
     session = requests.Session()
+    # Shown after the status box closes so they stay visible
+    constituent_warnings: list[str] = []
 
     if uploaded_file:
         constituent_source_label = uploaded_file.name
         with st.status(f"Loading constituent list from {uploaded_file.name}...", expanded=False) as status:
             try:
-                cik_set, ticker_from_cik, index_from_cik = russell.load_from_excel(uploaded_file)
+                cik_set, ticker_from_cik, index_from_cik = russell.load_from_excel(
+                    uploaded_file, warn_cb=constituent_warnings.append
+                )
                 status.update(
                     label=f"Loaded {len(cik_set)} companies from {uploaded_file.name}",
                     state="complete",
@@ -393,7 +417,7 @@ if fetch_btn:
 
             try:
                 cik_set, ticker_from_cik, index_from_cik = russell.load_russell_ciks(
-                    progress_cb=_r3k_log
+                    progress_cb=_r3k_log, warn_cb=constituent_warnings.append
                 )
                 status.update(
                     label=f"Russell 3000 loaded - {len(cik_set)} companies",
@@ -403,6 +427,9 @@ if fetch_btn:
                 status.update(label="Failed to load Russell 3000", state="error")
                 st.error(f"Could not load Russell 3000 list: {exc}")
                 st.stop()
+
+    for warning in constituent_warnings:
+        st.warning(warning)
 
     date_label = str(start_date) if start_date == end_date else f"{start_date} - {end_date}"
     source_label = "SEC EDGAR"
