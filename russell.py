@@ -13,6 +13,8 @@ iShares fallback and a user-uploaded file identically:
 import io
 import json
 import os
+import re
+import tempfile
 import time
 from datetime import datetime
 from typing import Callable
@@ -25,12 +27,26 @@ from config import (
     CACHE_DIR,
     COMPANY_TICKERS_URL,
     ISHARES_IWV_URL,
+    ISHARES_USER_AGENT,
     RUSSELL_CACHE_MAX_AGE_DAYS,
     RUSSELL_CACHE_PATH,
+    RUSSELL_MIN_COMPANIES,
     SEC_USER_AGENT,
 )
 
 _PH_TZ = ZoneInfo("Asia/Manila")
+
+
+class RussellSourceError(RuntimeError):
+    """The iShares holdings download could not be turned into a usable list."""
+
+
+def normalize_ticker(raw) -> str:
+    """
+    Normalize share-class separators to SEC's spelling so lookups match:
+    'BRK B' (iShares), 'BRK.B' and 'BRK/B' (other vendors) → 'BRK-B'.
+    """
+    return re.sub(r"[\s./]+", "-", str(raw).strip().upper())
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -38,6 +54,7 @@ _PH_TZ = ZoneInfo("Asia/Manila")
 def load_from_excel(
     file_obj,
     progress_cb: Callable[[str], None] | None = None,
+    warn_cb: Callable[[str], None] | None = None,
 ) -> tuple[set[str], dict[str, str], dict[str, str]]:
     """
     Load a constituent list from an uploaded Excel or CSV file.
@@ -105,7 +122,7 @@ def load_from_excel(
             # ticker — prefer file's ticker column, else reverse-lookup
             padded = norm.zfill(10)
             if ticker_col and pd.notna(row.get(ticker_col, None)):
-                ticker_from_cik[norm] = str(row[ticker_col]).strip().upper()
+                ticker_from_cik[norm] = normalize_ticker(row[ticker_col])
             elif padded in sec_ticker_map:
                 ticker_from_cik[norm] = sec_ticker_map[padded]
 
@@ -113,7 +130,7 @@ def load_from_excel(
 
     else:
         # ── Ticker-first path ─────────────────────────────────────────────────
-        tickers = set(df[ticker_col].dropna().str.upper().str.strip()) - {""}
+        tickers = {normalize_ticker(t) for t in df[ticker_col].dropna()} - {""}
         cik_set = set()
         ticker_from_cik = {}
         index_from_cik = {}
@@ -129,11 +146,15 @@ def load_from_excel(
             ticker_from_cik[norm] = ticker
 
         if missed:
-            print(f"[excel] {len(missed)} tickers not found in SEC map: {missed[:10]}")
+            _log(
+                warn_cb,
+                f"{len(missed)} ticker(s) in your file were not found in SEC's ticker list "
+                f"and were skipped: {', '.join(missed[:20])}{'…' if len(missed) > 20 else ''}",
+            )
 
         if index_col:
             for _, row in df.iterrows():
-                t = str(row[ticker_col]).upper().strip() if pd.notna(row[ticker_col]) else ""
+                t = normalize_ticker(row[ticker_col]) if pd.notna(row[ticker_col]) else ""
                 padded = sec_cik_map.get(t)
                 if not padded:
                     continue
@@ -147,21 +168,31 @@ def load_from_excel(
 def load_russell_ciks(
     force_refresh: bool = False,
     progress_cb: Callable[[str], None] | None = None,
+    warn_cb: Callable[[str], None] | None = None,
 ) -> tuple[set[str], dict[str, str], dict[str, str]]:
     """
     Download / load from cache the iShares IWV (Russell 3000) constituent list.
     Returns (cik_set, ticker_from_cik, {}).
+
+    A failed download never replaces the cache. On a forced refresh the error
+    is raised; otherwise a stale cache is used and the reason sent to warn_cb.
     """
-    if not force_refresh and _cache_is_fresh():
-        mapping = _read_cache()          # {ticker: padded_cik}
+    cached = _load_cache_data()
+    if cached and not force_refresh and _cache_age_days(cached) < RUSSELL_CACHE_MAX_AGE_DAYS:
+        mapping = cached["mapping"]      # {ticker: padded_cik}
     else:
-        _log(progress_cb, "Downloading Russell 3000 holdings from iShares IWV…")
-        russell_tickers = _fetch_russell_tickers()
-        _log(progress_cb, "Downloading SEC company → CIK map…")
-        cik_map = _fetch_sec_cik_map()
-        _log(progress_cb, "Merging and caching…")
-        mapping = _merge(russell_tickers, cik_map)
-        _write_cache(mapping)
+        try:
+            mapping = _download_and_cache(progress_cb)
+        except (requests.RequestException, RussellSourceError, ValueError) as exc:
+            if force_refresh or not cached:
+                raise
+            _log(
+                warn_cb,
+                f"Could not refresh the Russell 3000 list ({exc}). Using the saved list "
+                f"from {_format_ts(cached['timestamp'])} "
+                f"({_cache_age_days(cached):.0f} days old) instead.",
+            )
+            mapping = cached["mapping"]
 
     cik_set: set[str] = set()
     ticker_from_cik: dict[str, str] = {}
@@ -175,19 +206,16 @@ def load_russell_ciks(
 
 def cache_info() -> dict:
     """Return cache metadata for display in the UI."""
-    if not os.path.exists(RUSSELL_CACHE_PATH):
-        return {"exists": False, "age_days": None, "ticker_count": 0}
-    with open(RUSSELL_CACHE_PATH) as f:
-        data = json.load(f)
-    ts = data.get("timestamp", 0)
-    age_days = (time.time() - ts) / 86400
+    data = _load_cache_data()
+    if data is None:
+        return {"exists": False, "age_days": None, "ticker_count": 0, "unmatched": []}
     return {
         "exists": True,
-        "age_days": round(age_days, 1),
-        "ticker_count": len(data.get("mapping", {})),
-        "updated_at": datetime.fromtimestamp(ts, tz=_PH_TZ).strftime(
-            "%Y-%m-%d %H:%M PHT"
-        ),
+        "age_days": round(_cache_age_days(data), 1),
+        "ticker_count": len(data["mapping"]),
+        "updated_at": _format_ts(data["timestamp"]),
+        # [[ticker, name], ...] — absent in caches written before this was tracked
+        "unmatched": data.get("unmatched", []),
     }
 
 
@@ -198,43 +226,103 @@ def _log(cb, msg):
         cb(msg)
 
 
-def _cache_is_fresh() -> bool:
-    if not os.path.exists(RUSSELL_CACHE_PATH):
-        return False
-    with open(RUSSELL_CACHE_PATH) as f:
-        data = json.load(f)
-    age_days = (time.time() - data.get("timestamp", 0)) / 86400
-    return age_days < RUSSELL_CACHE_MAX_AGE_DAYS
+def _format_ts(ts: float) -> str:
+    return datetime.fromtimestamp(ts, tz=_PH_TZ).strftime("%Y-%m-%d %H:%M PHT")
 
 
-def _read_cache() -> dict[str, str]:
-    with open(RUSSELL_CACHE_PATH) as f:
-        data = json.load(f)
-    return data["mapping"]
+def _cache_age_days(data: dict) -> float:
+    return (time.time() - data["timestamp"]) / 86400
 
 
-def _write_cache(mapping: dict[str, str]) -> None:
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    with open(RUSSELL_CACHE_PATH, "w") as f:
-        json.dump({"timestamp": time.time(), "mapping": mapping}, f)
-
-
-def _fetch_russell_tickers() -> set[str]:
-    headers = {"User-Agent": SEC_USER_AGENT}
-    resp = requests.get(ISHARES_IWV_URL, headers=headers, timeout=30)
-    resp.raise_for_status()
-    lines = resp.text.splitlines()
+def _load_cache_data() -> dict | None:
+    """Return the parsed cache, or None if it is missing or unreadable."""
     try:
-        header_idx = next(i for i, line in enumerate(lines) if line.startswith("Ticker"))
-    except StopIteration:
-        raise ValueError(
-            "Could not find 'Ticker' header row in iShares IWV CSV. "
+        with open(RUSSELL_CACHE_PATH) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("mapping"), dict):
+        return None
+    if not isinstance(data.get("timestamp"), (int, float)):
+        data["timestamp"] = 0  # unknown age → treat as stale
+    return data
+
+
+def _write_cache(mapping: dict[str, str], unmatched: list[list[str]]) -> None:
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    # Write to a temp file then swap it in, so a crash or a second user
+    # refreshing at the same time can never leave a half-written cache
+    fd, tmp_path = tempfile.mkstemp(dir=CACHE_DIR, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(
+                {"timestamp": time.time(), "mapping": mapping, "unmatched": unmatched}, f
+            )
+        os.replace(tmp_path, RUSSELL_CACHE_PATH)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _download_and_cache(progress_cb) -> dict[str, str]:
+    _log(progress_cb, "Downloading Russell 3000 holdings from iShares IWV…")
+    holdings = _fetch_russell_holdings()
+    _log(progress_cb, "Downloading SEC company → CIK map…")
+    cik_map = _fetch_sec_cik_map()
+    _log(progress_cb, "Merging and caching…")
+    mapping, unmatched = _merge(holdings, cik_map)
+    company_count = len(set(mapping.values()))
+    if company_count < RUSSELL_MIN_COMPANIES:
+        raise RussellSourceError(
+            f"only {company_count:,} companies could be matched to an SEC CIK "
+            f"(expected at least {RUSSELL_MIN_COMPANIES:,}), so the download looks "
+            "incomplete. The previously saved list was kept."
+        )
+    _write_cache(mapping, unmatched)
+    return mapping
+
+
+def _fetch_russell_holdings() -> dict[str, str]:
+    """Return {normalized_ticker: company_name} for IWV's equity holdings."""
+    resp = requests.get(
+        ISHARES_IWV_URL, headers={"User-Agent": ISHARES_USER_AGENT}, timeout=30
+    )
+    resp.raise_for_status()
+    text = resp.text.lstrip("﻿")
+    # When the link moved, iShares answered 200 with its HTML product page while
+    # still labelling it text/csv, so check the body rather than the headers
+    if "<html" in text[:2000].lower():
+        raise RussellSourceError(
+            "iShares returned a web page instead of the holdings CSV. The download "
+            "link has probably changed; update ISHARES_IWV_URL in config.py."
+        )
+    lines = text.splitlines()
+    header_idx = next(
+        (i for i, line in enumerate(lines) if line.startswith("Ticker,")), None
+    )
+    if header_idx is None:
+        raise RussellSourceError(
+            "Could not find the 'Ticker' header row in the iShares IWV CSV. "
             "The file format may have changed."
         )
-    df = pd.read_csv(io.StringIO("\n".join(lines[header_idx:])))
+    df = pd.read_csv(io.StringIO("\n".join(lines[header_idx:])), dtype=str)
+    missing = {"Ticker", "Name", "Asset Class"} - set(df.columns)
+    if missing:
+        raise RussellSourceError(
+            f"The iShares IWV CSV is missing expected column(s): {', '.join(sorted(missing))}."
+        )
+    # Keep only stock holdings: drops futures, cash, money-market rows and
+    # placeholder rows with no ticker ("-")
+    df = df[df["Asset Class"].str.strip() == "Equity"]
     df = df[df["Ticker"].notna()]
-    df = df[~df["Ticker"].str.strip().isin(["-", "CASH", ""])]
-    return set(df["Ticker"].str.upper().str.strip())
+    df = df[~df["Ticker"].str.strip().isin(["-", ""])]
+    return {
+        normalize_ticker(ticker): str(name).strip()
+        for ticker, name in zip(df["Ticker"], df["Name"])
+    }
 
 
 def _fetch_sec_cik_map() -> dict[str, str]:
@@ -244,23 +332,21 @@ def _fetch_sec_cik_map() -> dict[str, str]:
     resp.raise_for_status()
     raw = resp.json()
     return {
-        entry["ticker"].upper(): str(entry["cik_str"]).zfill(10)
+        normalize_ticker(entry["ticker"]): str(entry["cik_str"]).zfill(10)
         for entry in raw.values()
     }
 
 
-def _merge(russell_tickers: set[str], cik_map: dict[str, str]) -> dict[str, str]:
+def _merge(
+    holdings: dict[str, str], cik_map: dict[str, str]
+) -> tuple[dict[str, str], list[list[str]]]:
+    """Return ({ticker: padded_cik}, [[ticker, name], ...] with no SEC match)."""
     mapping = {}
-    missed = []
-    for ticker in sorted(russell_tickers):
+    unmatched = []
+    for ticker in sorted(holdings):
         cik = cik_map.get(ticker)
         if cik:
             mapping[ticker] = cik
         else:
-            missed.append(ticker)
-    if missed:
-        print(
-            f"[russell] {len(missed)} tickers not in SEC map "
-            f"(non-equity rows): {missed[:10]}{'…' if len(missed) > 10 else ''}"
-        )
-    return mapping
+            unmatched.append([ticker, holdings[ticker]])
+    return mapping, unmatched

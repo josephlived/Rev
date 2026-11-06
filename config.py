@@ -19,15 +19,21 @@ EDGAR_ARCHIVE_BASE = "https://www.sec.gov/Archives/"
 COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 
 # iShares Russell 3000 ETF (IWV) holdings CSV
+# (the old ".ajax?fileType=csv" link now returns the HTML product page)
 ISHARES_IWV_URL = (
     "https://www.ishares.com/us/products/239714/ishares-russell-3000-etf/"
-    "1467271812596.ajax?fileType=csv&fileName=IWV_holdings&dataType=fund"
+    "latest-holdings.csv"
 )
+# iShares needs no contact details, so don't send it the SEC user agent
+ISHARES_USER_AGENT = "SEC-Ledger/1.0"
 
 # ── Local cache ───────────────────────────────────────────────────────────────
 CACHE_DIR = os.path.join(_BASE_DIR, "cache")
 RUSSELL_CACHE_PATH = os.path.join(CACHE_DIR, "russell3000_ciks.json")
 RUSSELL_CACHE_MAX_AGE_DAYS = 7
+# A refresh that maps fewer companies than this is treated as a bad download
+# and the previous cache is kept (IWV normally maps ~2,550)
+RUSSELL_MIN_COMPANIES = 2000
 
 # ── SEC request headers (required by SEC; swap for real contact info) ─────────
 SEC_USER_AGENT = "Joseph Lumbihao jc4892790@gmail.com"
