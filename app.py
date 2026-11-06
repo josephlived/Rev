@@ -14,8 +14,10 @@ import streamlit as st
 from openpyxl.styles import Font
 from streamlit.errors import StreamlitSecretNotFoundError
 
+import config
 import edgar
 import russell
+import settings
 from config import TARGET_FORMS
 
 
@@ -158,7 +160,7 @@ def _show_zero_match_diagnostics(
         form_counts = raw_df["form_type"].value_counts().head(12).reset_index()
         if not form_counts.empty:
             form_counts.columns = ["Form Type", "Count"]
-            st.dataframe(form_counts, hide_index=True, use_container_width=True)
+            st.dataframe(form_counts, hide_index=True, width="stretch")
     else:
         st.caption(
             "These filings matched the selected form types but were not in your constituent list:"
@@ -166,7 +168,7 @@ def _show_zero_match_diagnostics(
         st.dataframe(
             selected_form_df[["form_type", "company_name", "cik"]].reset_index(drop=True),
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
         )
 
 
@@ -174,10 +176,39 @@ def _get_anthropic_api_key() -> str:
     env_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if env_key:
         return env_key
+    if config.IS_DESKTOP:
+        return settings.get_api_key()
     try:
         return st.secrets.get("ANTHROPIC_API_KEY", "")
     except StreamlitSecretNotFoundError:
         return ""
+
+
+def _render_api_key_form() -> None:
+    """Desktop only: let the user save their own key on this computer."""
+    with st.form("api_key_form", clear_on_submit=True, border=False):
+        new_key = st.text_input(
+            "Anthropic API key", type="password", placeholder="sk-ant-..."
+        )
+        submitted = st.form_submit_button("Save key on this computer", width="stretch")
+    st.caption(
+        "Saved only on this computer, in your own user folder. "
+        "Get a key at console.anthropic.com."
+    )
+    if submitted:
+        new_key = new_key.strip()
+        if not new_key:
+            st.warning("Paste your API key first.")
+            return
+        with st.spinner("Checking key..."):
+            error = edgar.test_api_key(new_key)
+        if error:
+            st.error(f"That key didn't work, so it wasn't saved: {error}")
+            return
+        settings.set_api_key(new_key)
+        # Already validated: skip the second check on rerun
+        st.session_state.setdefault("anthropic_key_validation", {})[new_key] = None
+        st.rerun()
 
 
 def _mode_uses_api(parsing_mode: str) -> bool:
@@ -298,14 +329,14 @@ with st.sidebar:
                     st.dataframe(
                         pd.DataFrame(info["unmatched"], columns=["Ticker", "Name"]),
                         hide_index=True,
-                        use_container_width=True,
+                        width="stretch",
                     )
         else:
             st.warning("No cache - will download on first fetch.")
 
         refresh_btn = st.button(
             "Refresh Russell 3000 List",
-            use_container_width=True,
+            width="stretch",
             help="Force re-download of the iShares IWV holdings.",
         )
     else:
@@ -328,6 +359,7 @@ with st.sidebar:
 
     if _mode_uses_api(parsing_mode):
         api_key = _get_anthropic_api_key()
+        key_is_saved = config.IS_DESKTOP and bool(api_key) and api_key == settings.get_api_key()
         if api_key:
             key_error = _get_cached_api_validation(api_key)
             if key_error:
@@ -336,6 +368,11 @@ with st.sidebar:
             else:
                 api_available = True
                 st.success("Claude Haiku 4.5 available")
+            if key_is_saved and st.button("Remove saved API key", width="stretch"):
+                settings.clear_api_key()
+                st.rerun()
+        elif config.IS_DESKTOP:
+            _render_api_key_form()
         else:
             st.caption(
                 "No API key found. Add `ANTHROPIC_API_KEY` to Streamlit secrets or environment variables."
@@ -349,7 +386,7 @@ with st.sidebar:
     st.divider()
     fetch_btn = st.button(
         "Fetch Filings",
-        use_container_width=True,
+        width="stretch",
         type="primary",
         disabled=(
             not selected_forms
@@ -608,7 +645,7 @@ if fetch_btn:
     st.divider()
     st.subheader(f"Results for {date_label}")
     st.caption(f"Daily index source: {source_label}")
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    st.dataframe(display_df, width="stretch", hide_index=True)
 
     if start_date == end_date:
         xlsx_filename = f"sec_filings_{start_date}.xlsx"
