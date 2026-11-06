@@ -5,11 +5,22 @@ import os
 import sys
 
 # ── Base directory (works both in dev and when frozen by PyInstaller) ─────────
-if getattr(sys, "frozen", False):
-    # Running as a PyInstaller bundle — write cache next to the .exe
-    _BASE_DIR = os.path.dirname(sys.executable)
+# True only inside the desktop app (SEC-Ledger.exe). Per-user features such as
+# saving the API key are limited to it: on Streamlit Cloud every visitor would
+# share the same files.
+IS_DESKTOP = getattr(sys, "frozen", False)
+
+if IS_DESKTOP:
+    # The user's own app-data folder, e.g. C:\Users\<you>\AppData\Local\SEC Ledger.
+    # Not next to the .exe, which may sit in a read-only or shared folder.
+    _BASE_DIR = os.path.join(
+        os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "SEC Ledger"
+    )
 else:
     _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Desktop app settings (API key); see settings.py
+SETTINGS_PATH = os.path.join(_BASE_DIR, "settings.json")
 
 # ── EDGAR URLs ────────────────────────────────────────────────────────────────
 EDGAR_DAILY_INDEX_URL = (

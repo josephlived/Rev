@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+
+# Local Russell cache and desktop build output
+cache/
+build/
+dist/
