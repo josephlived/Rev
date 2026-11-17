@@ -31,6 +31,9 @@ _local_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def main():
+    # Before anything opens an HTTPS connection
+    _use_system_certificates()
+
     if "--self-test" in sys.argv[1:]:
         sys.exit(_self_test())
 
@@ -66,6 +69,20 @@ def main():
         "--theme.base=dark",
     ]
     sys.exit(stcli.main())
+
+
+def _use_system_certificates() -> None:
+    """Trust the certificates the operating system trusts, as browsers do.
+
+    Company networks that inspect HTTPS re-sign traffic with an internal
+    certificate that IT installs into Windows. Python's own certificate list
+    (certifi) doesn't include it, so every SEC, iShares and Anthropic request
+    failed with CERTIFICATE_VERIFY_FAILED. Certificates are still verified,
+    just against the Windows store instead of certifi.
+    """
+    import truststore
+
+    truststore.inject_into_ssl()
 
 
 def _app_path() -> str:
@@ -174,12 +191,21 @@ def _self_test() -> int:
 
         BeautifulSoup("<p>ok</p>", "lxml")
 
+    def system_certificates():
+        import ssl
+
+        import truststore
+
+        if not isinstance(ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT), truststore.SSLContext):
+            raise RuntimeError("HTTPS is not using the system certificate store")
+
     check("app.py bundled", app_script)
     check("streamlit frontend", streamlit_frontend)
     check("app modules", app_modules)
     check("anthropic client", anthropic_client)
     check("excel read/write", excel_round_trip)
     check("html parser", html_parser)
+    check("system certificates", system_certificates)
 
     print("\nSELF-TEST " + ("FAILED: " + ", ".join(failures) if failures else "PASSED"), flush=True)
     return 1 if failures else 0

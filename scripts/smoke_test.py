@@ -95,9 +95,15 @@ def _check_ui(url: str) -> None:
         # real API call, which also proves the anthropic library is bundled.
         page.get_by_label("Anthropic API key").fill("sk-ant-smoke-test-invalid")
         page.get_by_role("button", name="Save key on this computer").click()
-        expect(page.get_by_text("didn't work, so it wasn't saved")).to_be_visible()
+        rejection = page.get_by_text("didn't work, so it wasn't saved")
+        expect(rejection).to_be_visible()
+        # Must be Anthropic refusing the key (401), not a connection or
+        # certificate failure, which shows the same message
+        reason = rejection.inner_text()
+        if "401" not in reason and "authentication" not in reason.lower():
+            raise AssertionError(f"key rejected for the wrong reason: {reason}")
         _assert_no_exception(page)
-        print("ok    invalid API key rejected")
+        print("ok    invalid API key rejected by Anthropic")
 
         # Full Russell download inside the app. iShares/SEC are outside our
         # control, so a failure here is reported but doesn't fail the build.
@@ -106,6 +112,9 @@ def _check_ui(url: str) -> None:
             expect(page.get_by_text("holdings skipped (no SEC match)")).to_be_visible(timeout=120_000)
             print("ok    Russell 3000 refresh works inside the app")
         except AssertionError:
+            # A certificate failure is ours to fix (see launcher.py), not the source's
+            if page.get_by_text(re.compile("CERTIFICATE_VERIFY_FAILED", re.I)).count():
+                raise AssertionError("Russell 3000 refresh failed with a certificate error")
             print("WARN  Russell 3000 refresh did not complete (network or source issue)")
         _assert_no_exception(page)
         browser.close()
