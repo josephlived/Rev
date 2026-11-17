@@ -4,6 +4,7 @@ fail if the app crashes or shows an error.
 
     pip install playwright
     python scripts/smoke_test.py dist/SEC-Ledger.exe
+    python scripts/smoke_test.py python start_sec_ledger.py
 
 On Windows it drives the preinstalled Microsoft Edge; elsewhere Playwright's
 Chromium. The app runs with a throwaway settings/cache folder, so a real saved
@@ -23,13 +24,13 @@ STARTUP_TIMEOUT_S = 240
 _local = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def main(exe: str) -> int:
+def main(command: list[str]) -> int:
     data_dir = tempfile.mkdtemp(prefix="sec-ledger-smoke-")
     env = dict(os.environ, SEC_LEDGER_NO_BROWSER="1", LOCALAPPDATA=data_dir, HOME=data_dir)
     log_path = os.path.join(data_dir, "app.log")
     with open(log_path, "w") as log:
         proc = subprocess.Popen(
-            [exe], env=env, stdout=log, stderr=subprocess.STDOUT,
+            command, env=env, stdout=log, stderr=subprocess.STDOUT,
             start_new_session=(os.name != "nt"),
         )
     try:
@@ -98,12 +99,12 @@ def _check_ui(url: str) -> None:
         _assert_no_exception(page)
         print("ok    invalid API key rejected")
 
-        # Full Russell download inside the .exe. iShares/SEC are outside our
+        # Full Russell download inside the app. iShares/SEC are outside our
         # control, so a failure here is reported but doesn't fail the build.
         page.get_by_role("button", name="Refresh Russell 3000 List").click()
         try:
             expect(page.get_by_text("holdings skipped (no SEC match)")).to_be_visible(timeout=120_000)
-            print("ok    Russell 3000 refresh works inside the .exe")
+            print("ok    Russell 3000 refresh works inside the app")
         except AssertionError:
             print("WARN  Russell 3000 refresh did not complete (network or source issue)")
         _assert_no_exception(page)
@@ -121,7 +122,7 @@ def _stop(proc) -> None:
     if proc.poll() is not None:
         return
     if os.name == "nt":
-        # The one-file .exe runs the app in a child process: kill the whole tree
+        # The app runs in child processes (one-file .exe, start script): kill the tree
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
     else:
         os.killpg(proc.pid, 9)
@@ -129,4 +130,4 @@ def _stop(proc) -> None:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1]))
+    sys.exit(main(sys.argv[1:]))

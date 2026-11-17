@@ -1,5 +1,6 @@
-# Builds SEC-Ledger.exe on Windows, checks it actually starts, and, when a
-# GitHub release is published, attaches the .exe to that release.
+# On Windows: builds SEC-Ledger.exe and checks it starts (attaching it to a
+# published release), and checks that start_sec_ledger.py sets up and starts
+# the app with a plain Python install, as on work PCs that block the .exe.
 name: Windows app
 
 on:
@@ -55,3 +56,35 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ github.event.release.tag_name }}" dist/SEC-Ledger.exe --clobber
+
+  python-start:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13" # what the team's PCs have
+
+      - name: First-time setup, as a user would run it
+        run: python start_sec_ledger.py --setup-only
+
+      - name: Desktop shortcut was created
+        run: |
+          $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'SEC Ledger.lnk'
+          if (-not (Test-Path $lnk)) { throw "shortcut missing: $lnk" }
+          $s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+          "target: $($s.TargetPath) $($s.Arguments)"
+          if ($s.Arguments -notlike '*start_sec_ledger.py*') { throw 'shortcut does not run start_sec_ledger.py' }
+
+      - name: Second run skips the install
+        run: |
+          $out = python start_sec_ledger.py --setup-only | Out-String
+          $out
+          if ($out -match 'Installing') { throw 'reinstalled on second run' }
+
+      - name: Smoke test (starts and works in a browser)
+        run: |
+          pip install playwright
+          python scripts/smoke_test.py python start_sec_ledger.py
