@@ -5,10 +5,11 @@ import os
 import sys
 
 # ── Base directory (works both in dev and when frozen by PyInstaller) ─────────
-# True only inside the desktop app (SEC-Ledger.exe). Per-user features such as
-# saving the API key are limited to it: on Streamlit Cloud every visitor would
-# share the same files.
-IS_DESKTOP = getattr(sys, "frozen", False)
+# True when the app runs on the user's own PC: inside SEC-Ledger.exe, or started
+# with Python by start_sec_ledger.py (which sets SEC_LEDGER_DESKTOP=1). Per-user
+# features such as saving the API key are limited to it: on Streamlit Cloud
+# every visitor would share the same files.
+IS_DESKTOP = getattr(sys, "frozen", False) or os.environ.get("SEC_LEDGER_DESKTOP") == "1"
 
 if IS_DESKTOP:
     # The user's own app-data folder, e.g. C:\Users\<you>\AppData\Local\SEC Ledger.

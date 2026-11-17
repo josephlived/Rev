@@ -1,10 +1,11 @@
 """
-Desktop entry point: this is what PyInstaller wraps into SEC-Ledger.exe.
+Desktop entry point: PyInstaller wraps this into SEC-Ledger.exe, and
+start_sec_ledger.py runs it with the PC's own Python.
 
 It starts the Streamlit server on this computer only and opens the app in the
 default browser. Closing the console window stops the app.
 
-Do NOT run this directly during development — use:
+During development, use:
     streamlit run app.py
 
     SEC-Ledger.exe --self-test   imports everything the app needs and exits;
