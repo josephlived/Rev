@@ -1,6 +1,5 @@
-# On Windows: builds SEC-Ledger.exe and checks it starts (attaching it to a
-# published release), and checks that start_sec_ledger.py sets up and starts
-# the app with a plain Python install, as on work PCs that block the .exe.
+# On Windows, checks that start_sec_ledger.py sets up and starts the app with a
+# plain Python install, the way the team runs it, and that it works in a browser.
 name: Windows app
 
 on:
@@ -8,55 +7,11 @@ on:
     branches: [main, "claude/**"]
   pull_request:
   workflow_dispatch:
-  release:
-    types: [published]
 
 permissions:
   contents: read
 
 jobs:
-  build:
-    runs-on: windows-latest
-    timeout-minutes: 30
-    permissions:
-      contents: write # upload the .exe to the release
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller playwright
-          pip freeze > build-packages.txt
-
-      - name: Build SEC-Ledger.exe
-        run: pyinstaller --noconfirm sec_ledger.spec
-
-      - name: Self-test (everything is bundled)
-        run: .\dist\SEC-Ledger.exe --self-test
-
-      - name: Smoke test (starts and works in a browser)
-        run: python scripts/smoke_test.py dist\SEC-Ledger.exe
-
-      - uses: actions/upload-artifact@v6
-        with:
-          name: SEC-Ledger-${{ github.sha }}
-          path: |
-            dist/SEC-Ledger.exe
-            build-packages.txt
-          retention-days: 14
-
-      - name: Attach to release
-        if: github.event_name == 'release'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" dist/SEC-Ledger.exe --clobber
-
   python-start:
     runs-on: windows-latest
     timeout-minutes: 30

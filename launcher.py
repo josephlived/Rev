@@ -1,6 +1,5 @@
 """
-Desktop entry point: PyInstaller wraps this into SEC-Ledger.exe, and
-start_sec_ledger.py runs it with the PC's own Python.
+Desktop entry point: start_sec_ledger.py runs this with the PC's own Python.
 
 It starts the Streamlit server on this computer only and opens the app in the
 default browser. Closing the console window stops the app.
@@ -8,11 +7,8 @@ default browser. Closing the console window stops the app.
 During development, use:
     streamlit run app.py
 
-    SEC-Ledger.exe --self-test   imports everything the app needs and exits;
-                                 the build workflow uses it to catch modules
-                                 missing from the bundle.
-    SEC_LEDGER_NO_BROWSER=1      starts the server without opening a browser
-                                 (used by the smoke test).
+    SEC_LEDGER_NO_BROWSER=1   starts the server without opening a browser
+                              (used by the smoke test).
 """
 import os
 import socket
@@ -24,7 +20,7 @@ import webbrowser
 
 APP_NAME = "SEC Ledger"
 DEFAULT_PORT = 8501
-STARTUP_TIMEOUT_S = 180  # first launch can be slow while antivirus scans the .exe
+STARTUP_TIMEOUT_S = 180  # first launch can be slow while antivirus scans the libraries
 
 # Never send localhost requests through a corporate proxy
 _local_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -33,9 +29,6 @@ _local_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 def main():
     # Before anything opens an HTTPS connection
     _use_system_certificates()
-
-    if "--self-test" in sys.argv[1:]:
-        sys.exit(_self_test())
 
     port = DEFAULT_PORT
     if _is_app_running(port):
@@ -76,8 +69,8 @@ def _use_system_certificates() -> None:
 
     Company networks that inspect HTTPS re-sign traffic with an internal
     certificate that IT installs into Windows. Python's own certificate list
-    (certifi) doesn't include it, so every SEC, iShares and Anthropic request
-    failed with CERTIFICATE_VERIFY_FAILED. Certificates are still verified,
+    (certifi) doesn't include it, so every SEC and iShares request failed with
+    CERTIFICATE_VERIFY_FAILED. Certificates are still verified,
     just against the Windows store instead of certifi.
     """
     import truststore
@@ -86,8 +79,7 @@ def _use_system_certificates() -> None:
 
 
 def _app_path() -> str:
-    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base, "app.py")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.py")
 
 
 def _is_app_running(port: int) -> bool:
@@ -143,72 +135,6 @@ def _set_console_title(title: str) -> None:
         import ctypes
 
         ctypes.windll.kernel32.SetConsoleTitleW(title)
-
-
-def _self_test() -> int:
-    """Exercise every library the app uses; return a process exit code."""
-    failures = []
-
-    def check(name, fn):
-        try:
-            fn()
-            print(f"ok    {name}", flush=True)
-        except Exception as exc:  # report every failure, not just the first
-            failures.append(name)
-            print(f"FAIL  {name}: {type(exc).__name__}: {exc}", flush=True)
-
-    def app_script():
-        if not os.path.isfile(_app_path()):
-            raise FileNotFoundError(_app_path())
-
-    def streamlit_frontend():
-        import streamlit
-
-        index = os.path.join(os.path.dirname(streamlit.__file__), "static", "index.html")
-        if not os.path.isfile(index):
-            raise FileNotFoundError(index)
-
-    def app_modules():
-        import config, edgar, russell, settings, shared_list  # noqa: F401,E401
-
-    def anthropic_client():
-        import anthropic
-
-        anthropic.Anthropic(api_key="self-test")  # builds the client, no network call
-
-    def excel_round_trip():
-        import io
-
-        import pandas as pd
-
-        buf = io.BytesIO()
-        pd.DataFrame({"CIK": ["320193"]}).to_excel(buf, index=False, engine="openpyxl")
-        buf.seek(0)
-        pd.read_excel(buf, dtype=str)
-
-    def html_parser():
-        from bs4 import BeautifulSoup
-
-        BeautifulSoup("<p>ok</p>", "lxml")
-
-    def system_certificates():
-        import ssl
-
-        import truststore
-
-        if not isinstance(ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT), truststore.SSLContext):
-            raise RuntimeError("HTTPS is not using the system certificate store")
-
-    check("app.py bundled", app_script)
-    check("streamlit frontend", streamlit_frontend)
-    check("app modules", app_modules)
-    check("anthropic client", anthropic_client)
-    check("excel read/write", excel_round_trip)
-    check("html parser", html_parser)
-    check("system certificates", system_certificates)
-
-    print("\nSELF-TEST " + ("FAILED: " + ", ".join(failures) if failures else "PASSED"), flush=True)
-    return 1 if failures else 0
 
 
 if __name__ == "__main__":
