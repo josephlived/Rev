@@ -102,7 +102,6 @@ def load_from_excel(
 
     if cik_col is not None:
         # ── CIK-first path ────────────────────────────────────────────────────
-        raw_ciks = df[cik_col].dropna().astype(str).str.strip()
         cik_set: set[str] = set()
         index_from_cik: dict[str, str] = {}
         ticker_from_cik: dict[str, str] = {}

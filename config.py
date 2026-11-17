@@ -2,18 +2,17 @@
 Central configuration: all URLs, file paths, and constants.
 """
 import os
-import sys
 
-# ── Base directory (works both in dev and when frozen by PyInstaller) ─────────
-# True when the app runs on the user's own PC: inside SEC-Ledger.exe, or started
-# with Python by start_sec_ledger.py (which sets SEC_LEDGER_DESKTOP=1). Per-user
-# features such as saving the API key are limited to it: on Streamlit Cloud
-# every visitor would share the same files.
-IS_DESKTOP = getattr(sys, "frozen", False) or os.environ.get("SEC_LEDGER_DESKTOP") == "1"
+# ── Base directory ────────────────────────────────────────────────────────────
+# True when the app runs on the user's own PC, started by start_sec_ledger.py
+# (which sets SEC_LEDGER_DESKTOP=1). Per-user features such as saving the API
+# key are limited to it: on Streamlit Cloud every visitor would share the same
+# files.
+IS_DESKTOP = os.environ.get("SEC_LEDGER_DESKTOP") == "1"
 
 if IS_DESKTOP:
-    # The user's own app-data folder, e.g. C:\Users\<you>\AppData\Local\SEC Ledger.
-    # Not next to the .exe, which may sit in a read-only or shared folder.
+    # The user's own app-data folder, e.g. C:\Users\<you>\AppData\Local\SEC Ledger,
+    # so settings survive replacing the app folder with a new version.
     _BASE_DIR = os.path.join(
         os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "SEC Ledger"
     )

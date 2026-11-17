@@ -1,9 +1,8 @@
 """
-Smoke test for the built desktop app: start it, load it in a real browser and
-fail if the app crashes or shows an error.
+Smoke test for the desktop app: start it, load it in a real browser and fail
+if the app crashes or shows an error.
 
     pip install playwright
-    python scripts/smoke_test.py dist/SEC-Ledger.exe
     python scripts/smoke_test.py python start_sec_ledger.py
 
 On Windows it drives the preinstalled Microsoft Edge; elsewhere Playwright's
@@ -135,7 +134,7 @@ def _stop(proc) -> None:
     if proc.poll() is not None:
         return
     if os.name == "nt":
-        # The app runs in child processes (one-file .exe, start script): kill the tree
+        # The start script runs the app in a child process: kill the whole tree
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
     else:
         os.killpg(proc.pid, 9)

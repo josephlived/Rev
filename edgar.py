@@ -627,10 +627,6 @@ def _parse_meeting_date(raw_date: str) -> date | None:
     return None
 
 
-def _is_valid_meeting_result(info: dict | None, filing_date: date | None) -> bool:
-    return _get_invalid_meeting_reason(info, filing_date) is None
-
-
 def _get_invalid_meeting_reason(info: dict | None, filing_date: date | None) -> str | None:
     if not info:
         return "missing parsed meeting result"

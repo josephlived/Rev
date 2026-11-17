@@ -1,8 +1,6 @@
 __pycache__/
 *.pyc
 
-# Local Russell cache, desktop build output, start_sec_ledger.py libraries
+# Local Russell cache, start_sec_ledger.py libraries
 cache/
-build/
-dist/
 .venv/
