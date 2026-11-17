@@ -81,6 +81,10 @@ def _check_ui(url: str) -> None:
             raise AssertionError("Streamlit's developer 'Deploy' button is showing")
         print("ok    main page renders")
 
+        # Desktop-only: the shared Teams folder section (none exists on a test machine)
+        expect(page.get_by_text("Shared folder settings")).to_be_visible()
+        print("ok    shared folder section shown (desktop mode)")
+
         # Desktop-only: choosing API parsing with no saved key shows the key form
         page.get_by_role(
             "combobox", name=re.compile("Choose how DEF 14A meeting details are parsed")
