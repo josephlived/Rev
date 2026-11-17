@@ -20,7 +20,7 @@ if IS_DESKTOP:
 else:
     _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Desktop app settings (API key); see settings.py
+# Desktop app settings (API key, shared folder); see settings.py
 SETTINGS_PATH = os.path.join(_BASE_DIR, "settings.json")
 
 # ── EDGAR URLs ────────────────────────────────────────────────────────────────
@@ -46,6 +46,13 @@ RUSSELL_CACHE_MAX_AGE_DAYS = 7
 # A refresh that maps fewer companies than this is treated as a bad download
 # and the previous cache is kept (IWV normally maps ~2,550)
 RUSSELL_MIN_COMPANIES = 2000
+
+# ── Shared constituent list (desktop only; see shared_list.py) ────────────────
+# Teams/SharePoint folder, synced through OneDrive, holding the team's list
+SHARED_LIST_FOLDER_NAME = "SEC Ledger Constituents"
+SHARED_LIST_MAX_AGE_DAYS = 35  # older than this → "has there been a rebalance?"
+# Last list that loaded successfully, used when the shared file can't be read
+SHARED_LIST_BACKUP_DIR = os.path.join(CACHE_DIR, "shared_list")
 
 # ── SEC request headers (required by SEC; swap for real contact info) ─────────
 SEC_USER_AGENT = "Joseph Lumbihao jc4892790@gmail.com"

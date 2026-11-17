@@ -169,7 +169,7 @@ def _self_test() -> int:
             raise FileNotFoundError(index)
 
     def app_modules():
-        import config, edgar, russell, settings  # noqa: F401,E401
+        import config, edgar, russell, settings, shared_list  # noqa: F401,E401
 
     def anthropic_client():
         import anthropic

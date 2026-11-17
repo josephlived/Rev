@@ -18,7 +18,8 @@ import config
 import edgar
 import russell
 import settings
-from config import TARGET_FORMS
+import shared_list
+from config import SHARED_LIST_FOLDER_NAME, SHARED_LIST_MAX_AGE_DAYS, TARGET_FORMS
 
 
 EMPTY_DISPLAY = "-"
@@ -211,6 +212,70 @@ def _render_api_key_form() -> None:
         st.rerun()
 
 
+def _render_shared_list_status() -> str:
+    """Desktop only: show the shared Teams folder and its newest list.
+    Returns the folder to load from, or '' when none is set up."""
+    folder = settings.get_shared_folder()
+    # Search once per session; a failed search would otherwise rescan every rerun
+    if not folder and not st.session_state.get("shared_list_searched"):
+        st.session_state["shared_list_searched"] = True
+        with st.spinner("Looking for the shared folder..."):
+            folder = shared_list.search_folder()
+        if folder:
+            settings.set_shared_folder(folder)
+
+    backup = shared_list.backup_info()
+    backup_note = (
+        f" Your saved copy of **{backup['name']}** will be used instead." if backup else ""
+    )
+    if folder:
+        try:
+            newest = shared_list.newest_file(folder)
+        except OSError:
+            st.warning(f"Can't reach the shared folder right now.{backup_note}")
+        else:
+            if newest is None:
+                st.warning(f"There's no .xlsx or .csv file in the shared folder yet.{backup_note}")
+            else:
+                st.success(
+                    f"Shared list: **{newest.name}**\n\n"
+                    f"Saved {shared_list.format_date(newest.modified)} "
+                    f"({int(newest.age_days)} days ago)"
+                )
+                if shared_list.is_stale(newest.modified):
+                    st.warning(
+                        f"This list is over {SHARED_LIST_MAX_AGE_DAYS} days old. Has there "
+                        "been a rebalance? Save a fresh FactSet export to the shared folder."
+                    )
+    else:
+        st.info(
+            f"Shared folder **{SHARED_LIST_FOLDER_NAME}** not found. In Teams, open the "
+            "channel's **Files**, select the folder and click **Add shortcut to OneDrive** "
+            "(or **Sync**), then click **Search again**. Or paste its path below."
+        )
+
+    with st.expander("Shared folder settings", expanded=not folder):
+        if folder:
+            st.caption(f"Folder: `{folder}`")
+        new_path = st.text_input(
+            "Folder path",
+            placeholder=rf"C:\Users\you\OneDrive - Company\{SHARED_LIST_FOLDER_NAME}",
+            help="In File Explorer: Shift + right-click the folder → Copy as path, then paste it here.",
+        )
+        col1, col2 = st.columns(2)
+        if col1.button("Use this folder", width="stretch"):
+            try:
+                shared_list.set_folder(new_path)
+                st.rerun()
+            except shared_list.SharedListError as exc:
+                st.error(str(exc))
+        if col2.button("Search again", width="stretch"):
+            settings.clear_shared_folder()
+            st.session_state["shared_list_searched"] = False
+            st.rerun()
+    return folder
+
+
 def _mode_uses_api(parsing_mode: str) -> bool:
     return parsing_mode == edgar.PARSING_MODE_API
 
@@ -295,23 +360,28 @@ with st.sidebar:
     st.divider()
 
     st.subheader("Constituent List")
+    shared_folder = _render_shared_list_status() if config.IS_DESKTOP else ""
     uploaded_file = st.file_uploader(
-        "Upload your Excel/CSV list",
+        "Upload a different list for this run" if shared_folder else "Upload your Excel/CSV list",
         type=["xlsx", "xls", "csv"],
         help=(
             "Upload a file with a 'CIK' or 'Ticker' column and optionally an 'Index' "
             "column (for example 'Russell 1000' or 'S&P 500'). "
-            "If no file is uploaded, the app uses the iShares IWV (Russell 3000) list."
+            + (
+                "An upload overrides the shared list for this run."
+                if shared_folder
+                else "If no file is uploaded, the app uses the iShares IWV (Russell 3000) list."
+            )
         ),
     )
     if uploaded_file:
         st.success(f"Using uploaded file: {uploaded_file.name}")
-    else:
+    elif not shared_folder:
         st.caption("No file uploaded - using iShares IWV (Russell 3000).")
 
     st.divider()
 
-    if not uploaded_file:
+    if not uploaded_file and not shared_folder:
         st.subheader("Russell 3000 Cache")
         info = russell.cache_info()
         if info["exists"]:
@@ -443,6 +513,27 @@ if fetch_btn:
             except Exception as exc:
                 status.update(label="Failed to load uploaded file", state="error")
                 st.error(f"Could not read constituent file: {exc}")
+                st.stop()
+    elif shared_folder:
+        with st.status("Loading constituent list from the shared folder...", expanded=False) as status:
+            try:
+                cik_set, ticker_from_cik, index_from_cik, constituent_source_label = (
+                    shared_list.load_constituents(
+                        shared_folder, warn_cb=constituent_warnings.append
+                    )
+                )
+                status.update(
+                    label=f"Loaded {len(cik_set)} companies from {constituent_source_label}",
+                    state="complete",
+                )
+            except Exception as exc:
+                # Not falling back to iShares: results would silently use a
+                # different (approximate) universe
+                status.update(label="Failed to load the shared constituent list", state="error")
+                st.error(
+                    f"Could not load the shared constituent list: {exc}\n\n"
+                    "To run anyway, upload the list in the sidebar."
+                )
                 st.stop()
     else:
         constituent_source_label = "iShares IWV (Russell 3000)"

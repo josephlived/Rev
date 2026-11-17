@@ -12,6 +12,7 @@ import tempfile
 from config import SETTINGS_PATH
 
 _API_KEY = "anthropic_api_key"
+_SHARED_FOLDER = "shared_list_folder"
 
 
 def get_api_key() -> str:
@@ -28,6 +29,23 @@ def set_api_key(api_key: str) -> None:
 def clear_api_key() -> None:
     data = _load()
     if data.pop(_API_KEY, None) is not None:
+        _save(data)
+
+
+def get_shared_folder() -> str:
+    value = _load().get(_SHARED_FOLDER, "")
+    return value if isinstance(value, str) else ""
+
+
+def set_shared_folder(path: str) -> None:
+    data = _load()
+    data[_SHARED_FOLDER] = path
+    _save(data)
+
+
+def clear_shared_folder() -> None:
+    data = _load()
+    if data.pop(_SHARED_FOLDER, None) is not None:
         _save(data)
 
 

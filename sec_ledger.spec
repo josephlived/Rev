@@ -12,6 +12,7 @@ hiddenimports = [
     "edgar",
     "russell",
     "settings",
+    "shared_list",
     "anthropic",
     "bs4",
     "lxml",

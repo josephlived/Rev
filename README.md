@@ -50,6 +50,38 @@ ask IT whether `pypi.org` is allowed.
 **Updating:** download and extract the new zip over the old folder, then
 start as usual; it updates its libraries by itself if needed.
 
+### Shared constituent list (Teams folder)
+
+The team keeps its FactSet list in one Teams folder; everyone's app uses the
+newest file in it automatically, with no upload on each run.
+
+**Once, for the team (list owner):**
+
+1. In the team's Teams channel, open **Files** → **+ New → Folder** and name it
+   exactly **`SEC Ledger Constituents`**.
+2. Save the FactSet export there (`.xlsx` or `.csv`, with a **CIK** or
+   **Ticker** column, optionally **Index**).
+3. Each month (or after a rebalance), save the new export into the same folder.
+   Keep old files if you like; the app always uses the newest one.
+
+**Once, for each person:**
+
+1. In Teams, open the channel's **Files**, select the **SEC Ledger
+   Constituents** folder and click **Add shortcut to OneDrive** (or **Sync**).
+2. Start SEC Ledger. It finds the folder by itself and shows
+   *"Shared list: <file name>"* in the sidebar under **Constituent List**.
+   If it doesn't, open **Shared folder settings** in the sidebar, then either
+   click **Search again** or paste the folder's path (in File Explorer:
+   Shift + right-click the folder → **Copy as path**).
+
+**Good to know:**
+
+- The sidebar shows which file is used and when it was saved, and reminds you
+  when it is more than 35 days old.
+- If the shared file can't be read (offline, still syncing, or not a valid
+  list), the app uses the last list that worked and says so.
+- Uploading a file in the sidebar overrides the shared list for that run.
+
 **Uninstalling:** delete the folder and the desktop shortcut.
 
 ## Using the desktop app (`SEC-Ledger.exe`)
