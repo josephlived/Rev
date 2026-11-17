@@ -17,6 +17,7 @@ hiddenimports = [
     "lxml",
     "lxml.etree",
     "openpyxl",
+    "truststore",
 ]
 # Streamlit needs its frontend files and package metadata, not just its code
 st_datas, st_binaries, st_hiddenimports = collect_all("streamlit")
