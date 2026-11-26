@@ -63,4 +63,4 @@ TARGET_FORMS = {"10-K", "10-K/A", "10-KT", "DEF 14A", "20-F", "40-F", "NT 10-K"}
 RATE_LIMIT_RPS = 8  # stay safely under SEC's 10 req/s limit
 
 # ── DEF 14A parsing ───────────────────────────────────────────────────────────
-DEF14A_FETCH_BYTES = 150_000  # 150 KB — covers cover page even for large iXBRL filings
+DEF14A_FETCH_BYTES = 500_000  # 500 KB: large-cap proxies can put the meeting notice past 150 KB

@@ -310,8 +310,10 @@ def parse_def14a_filings(
     df["meeting_date"] = ""
     df["claude_error"] = ""
     df["parsing_method"] = ""
-    # Why an API date was left blank by the safety rule (see _date_conflict)
+    # Why an API date was left blank (see _check_date): kind is "conflict",
+    # "unconfirmed", "not_found" or "error"; date_check is the explanation
     df["date_check"] = ""
+    df["date_check_kind"] = ""
 
     def14a_mask = df["form_type_normalized"] == normalize_form_type("DEF 14A")
     total = def14a_mask.sum()
@@ -336,21 +338,24 @@ def parse_def14a_filings(
             else:
                 claude_result, claude_err = _parse_with_claude(html, api_key)
                 api_invalid_reason = _get_invalid_meeting_reason(claude_result, filing_date)
-                conflict = (
-                    _date_conflict(claude_result["meeting_date"], regex_info, sec_period, filing_date)
-                    if claude_result and api_invalid_reason is None
-                    else None
-                )
-                if conflict:
-                    # Another source contradicts the AI's date: show a blank
-                    # (which users check) rather than a possibly wrong date
-                    df.at[idx, "date_check"] = conflict
-                    info = {"meeting_type": claude_result["meeting_type"], "meeting_date": ""}
-                    method = "api-conflict"
-                elif claude_result and api_invalid_reason is None:
+                if claude_result and api_invalid_reason is None:
+                    status, note = _check_date(
+                        claude_result["meeting_date"], regex_info, sec_period, filing_date
+                    )
+                else:
+                    status, note = None, ""
+                if status == "confirmed":
                     info = claude_result
                     method = "api"
+                elif status:
+                    # Two-source rule: show only dates another source confirms;
+                    # otherwise a blank (which users check) and the reason
+                    df.at[idx, "date_check_kind"] = status
+                    df.at[idx, "date_check"] = note
+                    info = {"meeting_type": claude_result["meeting_type"], "meeting_date": ""}
+                    method = f"api-{status}"
                 else:
+                    df.at[idx, "date_check_kind"] = "error" if claude_result is None else "not_found"
                     df.at[idx, "claude_error"] = api_invalid_reason or claude_err or "unknown error"
                     info = {
                         "meeting_type": claude_result.get("meeting_type", "") if claude_result else "",
@@ -361,9 +366,13 @@ def parse_def14a_filings(
             df.at[idx, "meeting_date"] = info["meeting_date"]
             df.at[idx, "parsing_method"] = method
         except Exception as exc:
-            df.at[idx, "meeting_type"] = "Error"
-            df.at[idx, "meeting_date"] = str(exc)[:80]
+            # Never put error text in the result columns: leave them blank
+            # and report the problem with the other blanks
+            df.at[idx, "meeting_type"] = ""
+            df.at[idx, "meeting_date"] = ""
             df.at[idx, "parsing_method"] = "error"
+            df.at[idx, "date_check_kind"] = "error"
+            df.at[idx, "claude_error"] = f"couldn't read the filing: {str(exc)[:80]}"
 
     return df
 
@@ -633,7 +642,25 @@ def _build_claude_snippet(clean_text: str) -> str:
     return snippet
 
 
+_ANCHOR_PHRASE_RE = re.compile(
+    r"\b(?:annual|special|extraordinary)\s+(?:general\s+)?meeting\b", re.IGNORECASE
+)
+_ANCHOR_DATE_RE = re.compile(
+    r"\b(?:January|February|March|April|May|June|July|August|September|October|"
+    r"November|December)\s+\d{1,2},?\s+\d{4}",
+    re.IGNORECASE,
+)
+
+
 def _find_best_claude_anchor(clean_text: str) -> int | None:
+    # Prefer the first meeting mention that has a full date right after it
+    # ("annual meeting ... to be held on May 29, 2026"): the first mention is
+    # often a table of contents or a passing reference. On 18 proxies that
+    # came back blank this put the real date in the excerpt for 13 (was 1),
+    # with no loss on 40 that already worked.
+    for match in _ANCHOR_PHRASE_RE.finditer(clean_text):
+        if _ANCHOR_DATE_RE.search(clean_text, match.end(), match.end() + 400):
+            return match.start()
     for pattern in _CLAUDE_SNIPPET_PATTERNS:
         match = pattern.search(clean_text)
         if match:
@@ -663,32 +690,42 @@ def _parse_meeting_date(raw_date: str) -> date | None:
     return None
 
 
-def _date_conflict(
+def _check_date(
     ai_date_raw: str, regex_info: dict, sec_period: str, filing_date: date | None
-) -> str | None:
+) -> tuple[str, str]:
     """
-    Safety rule for API Parsing: a plausible date from another source (the
-    regex reading of the proxy text, or the SEC's "Period of Report") that
-    differs from Claude's date means one of them is wrong. Returns a short
-    reason, or None when nothing contradicts Claude.
+    Two-source rule for API Parsing: Claude's date is shown only when an
+    independent source gives the same date. The sources are the regex reading
+    of the proxy text and the SEC's "Period of Report"; they fail in different
+    ways from Claude, so agreeing on the same wrong date is very unlikely.
 
-    Only dates after the filing date count: regex often picks up the filing
-    date or earlier dates, and companies sometimes enter a fiscal year end or
-    the filing date as the period of report. In the accuracy test this caught
-    both of Haiku 4.5's wrong dates.
+    Returns (status, note): "confirmed", "conflict" (a source gives another
+    date) or "unconfirmed" (no source gives a date). Only source dates after
+    the filing date count: regex often picks up the filing date or earlier
+    dates, and companies sometimes enter a fiscal year end or the filing date
+    as the period of report. In the accuracy test (300 proxies) this blanked
+    both of Haiku 4.5's wrong dates and confirmed 95% of Haiku 5.5's dates.
     """
     ai_date = _parse_meeting_date(ai_date_raw)
     if ai_date is None or filing_date is None:
-        return None
-    candidates = [("the proxy text shows", _parse_meeting_date(regex_info.get("meeting_date", "")))]
+        return "unconfirmed", "Claude's date couldn't be checked"
+    sources = [("the proxy text shows", _parse_meeting_date(regex_info.get("meeting_date", "")))]
     try:
-        candidates.append(("the SEC lists", date.fromisoformat(sec_period) if sec_period else None))
+        sources.append(("the SEC lists", date.fromisoformat(sec_period) if sec_period else None))
     except ValueError:
         pass
-    for label, other in candidates:
-        if other is not None and other > filing_date and other != ai_date:
-            return f"{label} {other:%B} {other.day}, {other.year}"
-    return None
+    valid = [(label, d) for label, d in sources if d is not None and d > filing_date]
+    claude = f"Claude: {_format_date(ai_date)}"
+    for label, d in valid:
+        if d != ai_date:
+            return "conflict", f"{claude}; {label} {_format_date(d)}"
+    if valid:
+        return "confirmed", ""
+    return "unconfirmed", f"Claude suggests {_format_date(ai_date)}"
+
+
+def _format_date(d: date) -> str:
+    return f"{d:%B} {d.day}, {d.year}"
 
 
 def _get_invalid_meeting_reason(info: dict | None, filing_date: date | None) -> str | None:
