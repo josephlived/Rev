@@ -437,7 +437,7 @@ with st.sidebar:
                 api_key = ""
             else:
                 api_available = True
-                st.success("Claude Haiku 4.5 available")
+                st.success("Claude Haiku 5.5 available")
             if key_is_saved and st.button("Remove saved API key", width="stretch"):
                 settings.clear_api_key()
                 st.rerun()
@@ -700,6 +700,15 @@ if fetch_btn:
                 st.warning(
                     f"Claude API failed on {len(errors)} filing(s); meeting date left blank. "
                     f"First error: {errors.iloc[0]}"
+                )
+            conflicts = filtered_df[filtered_df["date_check"].str.len() > 0]
+            if not conflicts.empty:
+                details = "; ".join(
+                    f"{row.company_name}: {row.date_check}" for row in conflicts.itertuples()
+                )
+                st.warning(
+                    f"Meeting date left blank for {len(conflicts)} filing(s) because another "
+                    f"source disagreed with Claude's date. Please check them: {details}"
                 )
 
         if "parsing_method" in filtered_df.columns:

@@ -19,7 +19,11 @@ try:
 except ImportError:
     _ANTHROPIC_AVAILABLE = False
 
-_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+_ANTHROPIC_MODEL = "claude-haiku-5-5"
+# Haiku 5.5 thinks before answering by default; low effort keeps that short.
+# Accuracy test (300 R3K/S&P 500 proxies): same dates as Haiku 4.5 on 271/271,
+# and blank instead of 4.5's two wrong dates, at about 1/6 of the cost.
+_ANTHROPIC_EFFORT = {"effort": "low"}
 PARSING_MODE_REGEX = "Regex Parsing"
 PARSING_MODE_API = "API Parsing"
 PARSING_MODES = [PARSING_MODE_REGEX, PARSING_MODE_API]
@@ -306,6 +310,8 @@ def parse_def14a_filings(
     df["meeting_date"] = ""
     df["claude_error"] = ""
     df["parsing_method"] = ""
+    # Why an API date was left blank by the safety rule (see _date_conflict)
+    df["date_check"] = ""
 
     def14a_mask = df["form_type_normalized"] == normalize_form_type("DEF 14A")
     total = def14a_mask.sum()
@@ -320,7 +326,7 @@ def parse_def14a_filings(
             progress_cb(f"Parsing DEF 14A: {company}", i + 1, total)
 
         try:
-            html = _fetch_def14a_text(filename, row["cik"], session)
+            html, sec_period = _fetch_def14a_text(filename, row["cik"], session)
             regex_info = _parse_meeting_info(html)
             filing_date = _parse_filing_date(row.get("date_filed", ""))
 
@@ -330,7 +336,18 @@ def parse_def14a_filings(
             else:
                 claude_result, claude_err = _parse_with_claude(html, api_key)
                 api_invalid_reason = _get_invalid_meeting_reason(claude_result, filing_date)
-                if claude_result and api_invalid_reason is None:
+                conflict = (
+                    _date_conflict(claude_result["meeting_date"], regex_info, sec_period, filing_date)
+                    if claude_result and api_invalid_reason is None
+                    else None
+                )
+                if conflict:
+                    # Another source contradicts the AI's date: show a blank
+                    # (which users check) rather than a possibly wrong date
+                    df.at[idx, "date_check"] = conflict
+                    info = {"meeting_type": claude_result["meeting_type"], "meeting_date": ""}
+                    method = "api-conflict"
+                elif claude_result and api_invalid_reason is None:
                     info = claude_result
                     method = "api"
                 else:
@@ -353,23 +370,35 @@ def parse_def14a_filings(
 
 # ── DEF 14A fetch ─────────────────────────────────────────────────────────────
 
-def _fetch_def14a_text(filename: str, cik: str, session: requests.Session) -> str:
+def _fetch_def14a_text(filename: str, cik: str, session: requests.Session) -> tuple[str, str]:
+    """Return (document text, SEC "Period of Report" from the filing index or "")."""
     cik_clean, accession_nodash = _extract_accession_parts(filename, cik)
     index_url = _build_index_url(filename, cik)
     try:
         idx_resp = _get(session, index_url)
     except requests.HTTPError:
         raw_url = build_raw_filing_url(filename)
-        return _fetch_partial(raw_url, session)
+        return _fetch_partial(raw_url, session), ""
 
     soup = BeautifulSoup(idx_resp.text, "lxml")
+    period = _period_of_report(soup)
     doc_url = _find_primary_doc_url(soup, cik_clean, accession_nodash)
 
     if doc_url:
-        return _fetch_partial(doc_url, session)
+        return _fetch_partial(doc_url, session), period
 
     raw_url = build_raw_filing_url(filename)
-    return _fetch_partial(raw_url, session)
+    return _fetch_partial(raw_url, session), period
+
+
+def _period_of_report(index_soup: BeautifulSoup) -> str:
+    """The "Period of Report" on a filing index page (YYYY-MM-DD), or ""."""
+    for head in index_soup.select("div.infoHead"):
+        if head.get_text(strip=True) == "Period of Report":
+            value = head.find_next_sibling("div")
+            text = value.get_text(strip=True) if value else ""
+            return text if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) else ""
+    return ""
 
 
 def resolve_filing_url(filename: str, cik: str, session: requests.Session) -> str:
@@ -512,7 +541,8 @@ def test_api_key(api_key: str) -> str | None:
         client = _anthropic.Anthropic(api_key=api_key)
         client.messages.create(
             model=_ANTHROPIC_MODEL,
-            max_tokens=1,
+            max_tokens=64,
+            output_config=_ANTHROPIC_EFFORT,
             messages=[{"role": "user", "content": "hi"}],
         )
         return None
@@ -522,7 +552,7 @@ def test_api_key(api_key: str) -> str | None:
 
 def _parse_with_claude(html_text: str, api_key: str) -> tuple[dict | None, str | None]:
     """
-    Use Claude Haiku 4.5 to extract meeting_type and meeting_date from DEF 14A
+    Use Claude Haiku 5.5 to extract meeting_type and meeting_date from DEF 14A
     text.  Returns (result, None) on success or (None, error_str) on failure
     so the caller can fall back to regex and surface the error.
     """
@@ -537,10 +567,16 @@ def _parse_with_claude(html_text: str, api_key: str) -> tuple[dict | None, str |
         client = _anthropic.Anthropic(api_key=api_key)
         msg = client.messages.create(
             model=_ANTHROPIC_MODEL,
-            max_tokens=100,
+            max_tokens=1024,  # room for the model's thinking before the short answer
+            output_config=_ANTHROPIC_EFFORT,
             messages=[{"role": "user", "content": _CLAUDE_PROMPT + snippet}],
         )
-        raw = msg.content[0].text.strip()
+        if msg.stop_reason == "refusal":
+            return None, "Claude declined to read this filing"
+        # The reply can start with thinking blocks: take the text block
+        raw = next((b.text for b in msg.content if b.type == "text"), "").strip()
+        if not raw:
+            return None, f"no answer from Claude (stop reason: {msg.stop_reason})"
         # Strip markdown code fences if Claude wraps the response despite instructions
         raw = re.sub(r"^```(?:json)?\s*\n?", "", raw)
         raw = re.sub(r"\n?```$", "", raw).strip()
@@ -624,6 +660,34 @@ def _parse_meeting_date(raw_date: str) -> date | None:
             return datetime.strptime(raw_date.strip(), fmt).date()
         except ValueError:
             continue
+    return None
+
+
+def _date_conflict(
+    ai_date_raw: str, regex_info: dict, sec_period: str, filing_date: date | None
+) -> str | None:
+    """
+    Safety rule for API Parsing: a plausible date from another source (the
+    regex reading of the proxy text, or the SEC's "Period of Report") that
+    differs from Claude's date means one of them is wrong. Returns a short
+    reason, or None when nothing contradicts Claude.
+
+    Only dates after the filing date count: regex often picks up the filing
+    date or earlier dates, and companies sometimes enter a fiscal year end or
+    the filing date as the period of report. In the accuracy test this caught
+    both of Haiku 4.5's wrong dates.
+    """
+    ai_date = _parse_meeting_date(ai_date_raw)
+    if ai_date is None or filing_date is None:
+        return None
+    candidates = [("the proxy text shows", _parse_meeting_date(regex_info.get("meeting_date", "")))]
+    try:
+        candidates.append(("the SEC lists", date.fromisoformat(sec_period) if sec_period else None))
+    except ValueError:
+        pass
+    for label, other in candidates:
+        if other is not None and other > filing_date and other != ai_date:
+            return f"{label} {other:%B} {other.day}, {other.year}"
     return None
 
 
