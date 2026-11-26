@@ -13,6 +13,7 @@ On the same random sample of Russell 3000 DEF 14As it compares:
   - SEC date    the "report date" companies enter when filing
 """
 import hmac
+import io
 import json
 import random
 import re
@@ -27,6 +28,7 @@ import edgar
 import russell
 
 HAIKU_55 = "claude-haiku-5-5"
+IVV_URL = "https://www.ishares.com/us/products/239726/ishares-core-sp-500-etf/latest-holdings.csv"
 PRICE_PER_M = {"Haiku 4.5": (1.00, 5.00), "Haiku 5.5": (0.10, 0.50)}  # $ in / out
 METHODS = ["Regex", "Haiku 4.5", "Haiku 5.5"]
 SEASON = ("2026-01-01", "2026-06-30")
@@ -100,14 +102,30 @@ def parse_haiku_55(html: str, filing_date, client) -> tuple[str, str, str, float
             f"rejected: {reason}" if reason else "", cost)
 
 
-def run(sample_size: int, seed: int) -> None:
+def load_sp500_ciks() -> set[str]:
+    """S&P 500 companies, from the iShares Core S&P 500 ETF (IVV) holdings."""
+    resp = requests.get(IVV_URL, headers={"User-Agent": "SEC-Ledger/1.0"}, timeout=30)
+    resp.raise_for_status()
+    lines = resp.text.lstrip("﻿").splitlines()
+    header = next(i for i, line in enumerate(lines) if line.startswith("Ticker,"))
+    df = pd.read_csv(io.StringIO("\n".join(lines[header:])), dtype=str)
+    df = df[(df["Asset Class"].str.strip() == "Equity") & df["Ticker"].notna()]
+    cik_map = russell._fetch_sec_cik_map()
+    tickers = {russell.normalize_ticker(t) for t in df["Ticker"]}
+    return {str(int(cik_map[t])) for t in tickers if t in cik_map}
+
+
+def run(sample_size: int, seed: int, universe: str) -> None:
     state = st.session_state
-    if state.get("config") != (sample_size, seed):
-        state.config, state.rows, state.tried = (sample_size, seed), [], set()
+    if state.get("config") != (sample_size, seed, universe):
+        state.config, state.rows, state.tried = (sample_size, seed, universe), [], set()
     session = requests.Session()
     client = anthropic.Anthropic(api_key=api_key)
-    with st.spinner("Loading the Russell 3000 list..."):
-        cik_set, _, _ = russell.load_russell_ciks()
+    with st.spinner(f"Loading the {universe} list..."):
+        if universe == "S&P 500":
+            cik_set = load_sp500_ciks()
+        else:
+            cik_set, _, _ = russell.load_russell_ciks()
     ciks = sorted(cik_set)
     random.Random(seed).shuffle(ciks)
     bar = st.progress(len(state.rows) / sample_size, text="Starting...")
@@ -196,11 +214,12 @@ def report(rows: list[dict]) -> None:
                        "def14a_accuracy_test.csv", "text/csv")
 
 
+universe = st.radio("Companies", ["S&P 500", "Russell 3000"], horizontal=True)
 col1, col2 = st.columns(2)
 size = col1.number_input("Number of proxies", min_value=5, max_value=300, value=150, step=5)
-seed = col2.number_input("Sample seed (same seed = same companies)", min_value=1, value=2026)
+seed = col2.number_input("Sample seed (same seed = same companies)", min_value=1, value=500)
 st.caption(f"Estimated API cost: about ${size * 0.0025:.2f} in total. Keep this tab open while it runs.")
 if st.button("Run test (or continue an interrupted run)", type="primary"):
-    run(int(size), int(seed))
+    run(int(size), int(seed), universe)
 if st.session_state.get("rows"):
     report(st.session_state.rows)
