@@ -276,6 +276,39 @@ def _render_shared_list_status() -> str:
     return folder
 
 
+def _show_blank_dates(df: pd.DataFrame) -> None:
+    """API Parsing: one message listing every DEF 14A left blank, grouped by why."""
+    def14a = df[df["parsing_method"] != ""]
+    blank = def14a[def14a["date_check_kind"] != ""]
+    groups = [
+        ("Sources disagree", "conflict", True),
+        ("Found but not confirmed by a second source", "unconfirmed", True),
+        ("No date found", "not_found", False),
+        ("Couldn't read (filing or Claude error)", "error", False),
+    ]
+    lines = []
+    for title, kind, with_note in groups:
+        rows = blank[blank["date_check_kind"] == kind]
+        if rows.empty:
+            continue
+        if kind == "error":
+            items = [f"{r.company_name} ({r.claude_error})" for r in rows.itertuples()]
+        else:
+            items = [f"{r.company_name} ({r.date_check})" if with_note else r.company_name
+                     for r in rows.itertuples()]
+        lines.append(f"- **{title}:** " + " · ".join(items))
+    if lines:
+        st.warning(
+            f"**Meeting date left blank for {len(blank)} filing(s). Please check them:**\n"
+            + "\n".join(lines)
+        )
+    confirmed = (def14a["parsing_method"] == "api").sum()
+    st.caption(
+        f"API Parsing read {len(def14a)} DEF 14A(s): {confirmed} date(s) confirmed by two "
+        f"sources, {len(blank)} left blank" + (" (listed above)." if len(blank) else ".")
+    )
+
+
 def _mode_uses_api(parsing_mode: str) -> bool:
     return parsing_mode == edgar.PARSING_MODE_API
 
@@ -693,30 +726,10 @@ if fetch_btn:
         )
         progress_bar.empty()
         if _mode_uses_api(parsing_mode):
-            errors = filtered_df.loc[
-                filtered_df["claude_error"].str.len() > 0, "claude_error"
-            ]
-            if not errors.empty:
-                st.warning(
-                    f"Claude API failed on {len(errors)} filing(s); meeting date left blank. "
-                    f"First error: {errors.iloc[0]}"
-                )
-            conflicts = filtered_df[filtered_df["date_check"].str.len() > 0]
-            if not conflicts.empty:
-                details = "; ".join(
-                    f"{row.company_name}: {row.date_check}" for row in conflicts.itertuples()
-                )
-                st.warning(
-                    f"Meeting date left blank for {len(conflicts)} filing(s) because another "
-                    f"source disagreed with Claude's date. Please check them: {details}"
-                )
-
-        if "parsing_method" in filtered_df.columns:
-            api_used = (filtered_df["parsing_method"] == "api").sum()
+            _show_blank_dates(filtered_df)
+        elif "parsing_method" in filtered_df.columns:
             regex_used = (filtered_df["parsing_method"] == "regex").sum()
-            st.caption(
-                f"Meeting parsing mode: {parsing_mode}. Regex handled {regex_used} filing(s); API handled {api_used} filing(s)."
-            )
+            st.caption(f"Meeting parsing mode: {parsing_mode}. Regex read {regex_used} filing(s).")
     else:
         filtered_df["meeting_type"] = ""
         filtered_df["meeting_date"] = ""
