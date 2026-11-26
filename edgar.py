@@ -310,8 +310,8 @@ def parse_def14a_filings(
     df["meeting_date"] = ""
     df["claude_error"] = ""
     df["parsing_method"] = ""
-    # Why an API date was left blank (see _check_date): kind is "conflict",
-    # "unconfirmed", "not_found" or "error"; date_check is the explanation
+    # Why an API date was left blank (see _check_date): kind is "unconfirmed",
+    # "not_found" or "error"; date_check is Ledger's unconfirmed reading
     df["date_check"] = ""
     df["date_check_kind"] = ""
 
@@ -328,28 +328,25 @@ def parse_def14a_filings(
             progress_cb(f"Parsing DEF 14A: {company}", i + 1, total)
 
         try:
-            html, sec_period = _fetch_def14a_text(filename, row["cik"], session)
-            regex_info = _parse_meeting_info(html)
+            html = _fetch_def14a_text(filename, row["cik"], session)
             filing_date = _parse_filing_date(row.get("date_filed", ""))
 
             if parsing_mode == PARSING_MODE_REGEX or not api_enabled:
-                info = regex_info
+                info = _parse_meeting_info(html)
                 method = "regex"
             else:
                 claude_result, claude_err = _parse_with_claude(html, api_key)
                 api_invalid_reason = _get_invalid_meeting_reason(claude_result, filing_date)
                 if claude_result and api_invalid_reason is None:
-                    status, note = _check_date(
-                        claude_result["meeting_date"], regex_info, sec_period, filing_date
-                    )
+                    status, note = _check_date(claude_result["meeting_date"], html)
                 else:
                     status, note = None, ""
                 if status == "confirmed":
                     info = claude_result
                     method = "api"
                 elif status:
-                    # Two-source rule: show only dates another source confirms;
-                    # otherwise a blank (which users check) and the reason
+                    # Show only dates the proxy statement itself confirms;
+                    # otherwise a blank (which users check) and Ledger's reading
                     df.at[idx, "date_check_kind"] = status
                     df.at[idx, "date_check"] = note
                     info = {"meeting_type": claude_result["meeting_type"], "meeting_date": ""}
@@ -379,35 +376,23 @@ def parse_def14a_filings(
 
 # ── DEF 14A fetch ─────────────────────────────────────────────────────────────
 
-def _fetch_def14a_text(filename: str, cik: str, session: requests.Session) -> tuple[str, str]:
-    """Return (document text, SEC "Period of Report" from the filing index or "")."""
+def _fetch_def14a_text(filename: str, cik: str, session: requests.Session) -> str:
     cik_clean, accession_nodash = _extract_accession_parts(filename, cik)
     index_url = _build_index_url(filename, cik)
     try:
         idx_resp = _get(session, index_url)
     except requests.HTTPError:
         raw_url = build_raw_filing_url(filename)
-        return _fetch_partial(raw_url, session), ""
+        return _fetch_partial(raw_url, session)
 
     soup = BeautifulSoup(idx_resp.text, "lxml")
-    period = _period_of_report(soup)
     doc_url = _find_primary_doc_url(soup, cik_clean, accession_nodash)
 
     if doc_url:
-        return _fetch_partial(doc_url, session), period
+        return _fetch_partial(doc_url, session)
 
     raw_url = build_raw_filing_url(filename)
-    return _fetch_partial(raw_url, session), period
-
-
-def _period_of_report(index_soup: BeautifulSoup) -> str:
-    """The "Period of Report" on a filing index page (YYYY-MM-DD), or ""."""
-    for head in index_soup.select("div.infoHead"):
-        if head.get_text(strip=True) == "Period of Report":
-            value = head.find_next_sibling("div")
-            text = value.get_text(strip=True) if value else ""
-            return text if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) else ""
-    return ""
+    return _fetch_partial(raw_url, session)
 
 
 def resolve_filing_url(filename: str, cik: str, session: requests.Session) -> str:
@@ -566,12 +551,7 @@ def _parse_with_claude(html_text: str, api_key: str) -> tuple[dict | None, str |
     so the caller can fall back to regex and surface the error.
     """
     try:
-        try:
-            clean = BeautifulSoup(html_text, "lxml").get_text(" ", strip=True)
-        except Exception:
-            clean = re.sub(r"<[^>]+>", " ", html_text)
-        clean = re.sub(r"\s+", " ", clean)
-        snippet = _build_claude_snippet(clean)
+        snippet = _build_claude_snippet(_clean_text(html_text))
 
         client = _anthropic.Anthropic(api_key=api_key)
         msg = client.messages.create(
@@ -581,11 +561,11 @@ def _parse_with_claude(html_text: str, api_key: str) -> tuple[dict | None, str |
             messages=[{"role": "user", "content": _CLAUDE_PROMPT + snippet}],
         )
         if msg.stop_reason == "refusal":
-            return None, "Claude declined to read this filing"
+            return None, "Ledger's AI declined to read this filing"
         # The reply can start with thinking blocks: take the text block
         raw = next((b.text for b in msg.content if b.type == "text"), "").strip()
         if not raw:
-            return None, f"no answer from Claude (stop reason: {msg.stop_reason})"
+            return None, f"no answer from Ledger's AI (stop reason: {msg.stop_reason})"
         # Strip markdown code fences if Claude wraps the response despite instructions
         raw = re.sub(r"^```(?:json)?\s*\n?", "", raw)
         raw = re.sub(r"\n?```$", "", raw).strip()
@@ -690,38 +670,42 @@ def _parse_meeting_date(raw_date: str) -> date | None:
     return None
 
 
-def _check_date(
-    ai_date_raw: str, regex_info: dict, sec_period: str, filing_date: date | None
-) -> tuple[str, str]:
-    """
-    Two-source rule for API Parsing: Claude's date is shown only when an
-    independent source gives the same date. The sources are the regex reading
-    of the proxy text and the SEC's "Period of Report"; they fail in different
-    ways from Claude, so agreeing on the same wrong date is very unlikely.
+_MEETING_WORDING_RE = re.compile(
+    r"\b(?:annual|special|extraordinary)\s+(?:general\s+)?meeting\b"
+    r"|\bmeeting\s+of\s+(?:share|stock)holders\b",
+    re.IGNORECASE,
+)
 
-    Returns (status, note): "confirmed", "conflict" (a source gives another
-    date) or "unconfirmed" (no source gives a date). Only source dates after
-    the filing date count: regex often picks up the filing date or earlier
-    dates, and companies sometimes enter a fiscal year end or the filing date
-    as the period of report. In the accuracy test (300 proxies) this blanked
-    both of Haiku 4.5's wrong dates and confirmed 95% of Haiku 5.5's dates.
+
+def _check_date(ai_date_raw: str, html_text: str) -> tuple[str, str]:
+    """
+    API Parsing shows Ledger's date only when the proxy statement itself
+    states that exact date within 300 characters of meeting wording ("annual
+    meeting", "meeting of stockholders", ...). Returns ("confirmed", "") or
+    ("unconfirmed", "Ledger: <date>").
+
+    On 300 test proxies this kept 269 of Ledger's 271 dates and blanked both
+    of Haiku 4.5's wrong dates, which the letter doesn't state that way.
     """
     ai_date = _parse_meeting_date(ai_date_raw)
-    if ai_date is None or filing_date is None:
-        return "unconfirmed", "Claude's date couldn't be checked"
-    sources = [("the proxy text shows", _parse_meeting_date(regex_info.get("meeting_date", "")))]
+    if ai_date is None:
+        return "unconfirmed", f"Ledger: {ai_date_raw}"
+    text = _clean_text(html_text)
+    stated = re.compile(
+        rf"\b{ai_date:%B}\s+{ai_date.day}(?:st|nd|rd|th)?,?\s+{ai_date.year}\b", re.IGNORECASE
+    )
+    for match in stated.finditer(text):
+        if _MEETING_WORDING_RE.search(text, max(0, match.start() - 300), match.end() + 300):
+            return "confirmed", ""
+    return "unconfirmed", f"Ledger: {_format_date(ai_date)}"
+
+
+def _clean_text(html_text: str) -> str:
     try:
-        sources.append(("the SEC lists", date.fromisoformat(sec_period) if sec_period else None))
-    except ValueError:
-        pass
-    valid = [(label, d) for label, d in sources if d is not None and d > filing_date]
-    claude = f"Claude: {_format_date(ai_date)}"
-    for label, d in valid:
-        if d != ai_date:
-            return "conflict", f"{claude}; {label} {_format_date(d)}"
-    if valid:
-        return "confirmed", ""
-    return "unconfirmed", f"Claude suggests {_format_date(ai_date)}"
+        text = BeautifulSoup(html_text, "lxml").get_text(" ", strip=True)
+    except Exception:
+        text = re.sub(r"<[^>]+>", " ", html_text)
+    return re.sub(r"\s+", " ", text)
 
 
 def _format_date(d: date) -> str:

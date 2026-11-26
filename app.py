@@ -276,36 +276,32 @@ def _render_shared_list_status() -> str:
     return folder
 
 
-def _show_blank_dates(df: pd.DataFrame) -> None:
-    """API Parsing: one message listing every DEF 14A left blank, grouped by why."""
+_REVIEW_STATUS = {"unconfirmed": "Not confirmed", "not_found": "Not found", "error": "Error"}
+
+
+def _show_date_review(df: pd.DataFrame) -> None:
+    """API Parsing: a summary line, and the DEF 14As whose date was left blank."""
     def14a = df[df["parsing_method"] != ""]
-    blank = def14a[def14a["date_check_kind"] != ""]
-    groups = [
-        ("Sources disagree", "conflict", True),
-        ("Found but not confirmed by a second source", "unconfirmed", True),
-        ("No date found", "not_found", False),
-        ("Couldn't read (filing or Claude error)", "error", False),
-    ]
-    lines = []
-    for title, kind, with_note in groups:
-        rows = blank[blank["date_check_kind"] == kind]
-        if rows.empty:
-            continue
-        if kind == "error":
-            items = [f"{r.company_name} ({r.claude_error})" for r in rows.itertuples()]
-        else:
-            items = [f"{r.company_name} ({r.date_check})" if with_note else r.company_name
-                     for r in rows.itertuples()]
-        lines.append(f"- **{title}:** " + " · ".join(items))
-    if lines:
-        st.warning(
-            f"**Meeting date left blank for {len(blank)} filing(s). Please check them:**\n"
-            + "\n".join(lines)
-        )
+    review = def14a[def14a["date_check_kind"] != ""]
     confirmed = (def14a["parsing_method"] == "api").sum()
-    st.caption(
-        f"API Parsing read {len(def14a)} DEF 14A(s): {confirmed} date(s) confirmed by two "
-        f"sources, {len(blank)} left blank" + (" (listed above)." if len(blank) else ".")
+    st.caption(f"{len(def14a)} DEF 14A · {confirmed} confirmed · {len(review)} review")
+    if review.empty:
+        return
+    st.warning(f"{len(review)} meeting date(s) need review")
+    table = pd.DataFrame({
+        "Company": review["company_name"],
+        "Status": review["date_check_kind"].map(_REVIEW_STATUS),
+        "Ledger date": review["date_check"].str.removeprefix("Ledger: "),
+        "Note": review.apply(
+            lambda r: r["claude_error"] if r["date_check_kind"] == "error" else "", axis=1
+        ),
+        "Filing": review["filing_url"],
+    })
+    if not table["Note"].str.len().any():
+        table = table.drop(columns="Note")
+    st.dataframe(
+        table, hide_index=True, width="stretch",
+        column_config={"Filing": st.column_config.LinkColumn("Filing", display_text="open")},
     )
 
 
@@ -453,7 +449,7 @@ with st.sidebar:
         options=edgar.PARSING_MODES,
         index=edgar.PARSING_MODES.index(edgar.PARSING_MODE_REGEX),
         label_visibility="collapsed",
-        help="Regex is cheapest; API uses Claude Haiku for every DEF 14A.",
+        help="Regex is free; API Parsing reads every DEF 14A with Ledger's AI.",
     )
 
     api_key = ""
@@ -466,11 +462,11 @@ with st.sidebar:
         if api_key:
             key_error = _get_cached_api_validation(api_key)
             if key_error:
-                st.error(f"Claude API key error: {key_error}")
+                st.error(f"API key error: {key_error}")
                 api_key = ""
             else:
                 api_available = True
-                st.success("Claude Haiku 5.5 available")
+                st.success("API Parsing ready")
             if key_is_saved and st.button("Remove saved API key", width="stretch"):
                 settings.clear_api_key()
                 st.rerun()
@@ -725,9 +721,7 @@ if fetch_btn:
             api_key=api_key or None,
         )
         progress_bar.empty()
-        if _mode_uses_api(parsing_mode):
-            _show_blank_dates(filtered_df)
-        elif "parsing_method" in filtered_df.columns:
+        if not _mode_uses_api(parsing_mode) and "parsing_method" in filtered_df.columns:
             regex_used = (filtered_df["parsing_method"] == "regex").sum()
             st.caption(f"Meeting parsing mode: {parsing_mode}. Regex read {regex_used} filing(s).")
     else:
@@ -758,6 +752,8 @@ if fetch_btn:
     st.divider()
     st.subheader(f"Results for {date_label}")
     st.caption(f"Daily index source: {source_label}")
+    if _mode_uses_api(parsing_mode) and "date_check_kind" in filtered_df.columns:
+        _show_date_review(filtered_df)
     st.dataframe(display_df, width="stretch", hide_index=True)
 
     if start_date == end_date:
