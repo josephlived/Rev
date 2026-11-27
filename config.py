@@ -64,3 +64,5 @@ RATE_LIMIT_RPS = 8  # stay safely under SEC's 10 req/s limit
 
 # ── DEF 14A parsing ───────────────────────────────────────────────────────────
 DEF14A_FETCH_BYTES = 500_000  # 500 KB: large-cap proxies can put the meeting notice past 150 KB
+# DEF 14As processed at once; overlaps the waits for the AI's replies
+DEF14A_WORKERS = 5

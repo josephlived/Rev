@@ -9,7 +9,9 @@ Covers:
 """
 import json as _json
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from typing import Callable
 
@@ -50,6 +52,7 @@ from bs4 import BeautifulSoup
 
 from config import (
     DEF14A_FETCH_BYTES,
+    DEF14A_WORKERS,
     EDGAR_ARCHIVE_BASE,
     EDGAR_DAILY_INDEX_URL,
     RATE_LIMIT_RPS,
@@ -109,6 +112,7 @@ _IDX_TAIL_RE = re.compile(
 
 _last_request_ts: float = 0.0
 _min_interval: float = 1.0 / RATE_LIMIT_RPS  # seconds between requests
+_rate_lock = threading.Lock()
 
 
 class SecAccessError(RuntimeError):
@@ -121,18 +125,20 @@ class SecAccessError(RuntimeError):
 
 
 def _get(session: requests.Session, url: str, **kwargs) -> requests.Response:
-    """GET with per-request rate limiting and the required User-Agent header."""
+    """GET with per-request rate limiting and the required User-Agent header.
+    Safe across threads: request starts are spaced at least _min_interval apart."""
     global _last_request_ts
-    elapsed = time.monotonic() - _last_request_ts
-    if elapsed < _min_interval:
-        time.sleep(_min_interval - elapsed)
+    with _rate_lock:
+        wait = _min_interval - (time.monotonic() - _last_request_ts)
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_ts = time.monotonic()
     resp = session.get(
         url,
         headers={"User-Agent": SEC_USER_AGENT},
         timeout=30,
         **kwargs,
     )
-    _last_request_ts = time.monotonic()
     resp.raise_for_status()
     return resp
 
@@ -316,62 +322,66 @@ def parse_def14a_filings(
     df["date_check_kind"] = ""
 
     def14a_mask = df["form_type_normalized"] == normalize_form_type("DEF 14A")
-    total = def14a_mask.sum()
+    total = int(def14a_mask.sum())
     api_enabled = bool(api_key and _ANTHROPIC_AVAILABLE)
+    use_api = parsing_mode != PARSING_MODE_REGEX and api_enabled
 
-    for i, idx in enumerate(df[def14a_mask].index):
-        row = df.loc[idx]
-        company = row["company_name"]
-        filename = row["filename"]
-
-        if progress_cb:
-            progress_cb(f"Parsing DEF 14A: {company}", i + 1, total)
-
-        try:
-            html = _fetch_def14a_text(filename, row["cik"], session)
-            filing_date = _parse_filing_date(row.get("date_filed", ""))
-
-            if parsing_mode == PARSING_MODE_REGEX or not api_enabled:
-                info = _parse_meeting_info(html)
-                method = "regex"
-            else:
-                claude_result, claude_err = _parse_with_claude(html, api_key)
-                api_invalid_reason = _get_invalid_meeting_reason(claude_result, filing_date)
-                if claude_result and api_invalid_reason is None:
-                    status, note = _check_date(claude_result["meeting_date"], html)
-                else:
-                    status, note = None, ""
-                if status == "confirmed":
-                    info = claude_result
-                    method = "api"
-                elif status:
-                    # Show only dates the proxy statement itself confirms;
-                    # otherwise a blank (which users check) and Ledger's reading
-                    df.at[idx, "date_check_kind"] = status
-                    df.at[idx, "date_check"] = note
-                    info = {"meeting_type": claude_result["meeting_type"], "meeting_date": ""}
-                    method = f"api-{status}"
-                else:
-                    df.at[idx, "date_check_kind"] = "error" if claude_result is None else "not_found"
-                    df.at[idx, "claude_error"] = api_invalid_reason or claude_err or "unknown error"
-                    info = {
-                        "meeting_type": claude_result.get("meeting_type", "") if claude_result else "",
-                        "meeting_date": "",
-                    }
-                    method = "api-rejected"
-            df.at[idx, "meeting_type"] = info["meeting_type"]
-            df.at[idx, "meeting_date"] = info["meeting_date"]
-            df.at[idx, "parsing_method"] = method
-        except Exception as exc:
-            # Never put error text in the result columns: leave them blank
-            # and report the problem with the other blanks
-            df.at[idx, "meeting_type"] = ""
-            df.at[idx, "meeting_date"] = ""
-            df.at[idx, "parsing_method"] = "error"
-            df.at[idx, "date_check_kind"] = "error"
-            df.at[idx, "claude_error"] = f"couldn't read the filing: {str(exc)[:80]}"
+    # Several filings at once: most of the time is spent waiting for the AI's
+    # reply, so overlapping the waits makes a run several times faster. Each
+    # filing goes through exactly the same steps, results are written back to
+    # their own rows, and SEC requests still go through the shared rate limit.
+    rows = {idx: df.loc[idx] for idx in df[def14a_mask].index}
+    with ThreadPoolExecutor(max_workers=DEF14A_WORKERS) as pool:
+        futures = {
+            pool.submit(_parse_one_def14a, row, session, use_api, api_key): idx
+            for idx, row in rows.items()
+        }
+        # Progress and writes stay on this thread (Streamlit UI calls must)
+        for done, future in enumerate(as_completed(futures), start=1):
+            idx = futures[future]
+            for column, value in future.result().items():
+                df.at[idx, column] = value
+            if progress_cb:
+                progress_cb(f"Parsed DEF 14A: {rows[idx]['company_name']}", done, total)
 
     return df
+
+
+def _parse_one_def14a(row: pd.Series, session: requests.Session, use_api: bool, api_key: str | None) -> dict:
+    """Meeting type and date for one DEF 14A row, as the columns to set."""
+    try:
+        html = _fetch_def14a_text(row["filename"], row["cik"], session)
+        filing_date = _parse_filing_date(row.get("date_filed", ""))
+        if not use_api:
+            info = _parse_meeting_info(html)
+            return {"meeting_type": info["meeting_type"], "meeting_date": info["meeting_date"],
+                    "parsing_method": "regex"}
+
+        text = _clean_text(html)
+        claude_result, claude_err = _parse_with_claude(text, api_key)
+        api_invalid_reason = _get_invalid_meeting_reason(claude_result, filing_date)
+        if claude_result is None or api_invalid_reason is not None:
+            return {
+                "meeting_type": claude_result.get("meeting_type", "") if claude_result else "",
+                "meeting_date": "",
+                "parsing_method": "api-rejected",
+                "date_check_kind": "error" if claude_result is None else "not_found",
+                "claude_error": api_invalid_reason or claude_err or "unknown error",
+            }
+        status, note = _check_date(claude_result["meeting_date"], text)
+        if status == "confirmed":
+            return {"meeting_type": claude_result["meeting_type"],
+                    "meeting_date": claude_result["meeting_date"], "parsing_method": "api"}
+        # Show only dates the proxy statement itself confirms; otherwise a
+        # blank (which users check) and Ledger's reading
+        return {"meeting_type": claude_result["meeting_type"], "meeting_date": "",
+                "parsing_method": f"api-{status}", "date_check_kind": status, "date_check": note}
+    except Exception as exc:
+        # Never put error text in the result columns: leave them blank and
+        # report the problem with the other blanks
+        return {"meeting_type": "", "meeting_date": "", "parsing_method": "error",
+                "date_check_kind": "error",
+                "claude_error": f"couldn't read the filing: {str(exc)[:80]}"}
 
 
 # ── DEF 14A fetch ─────────────────────────────────────────────────────────────
@@ -457,14 +467,7 @@ def _find_primary_doc_url(
 
 def _fetch_partial(url: str, session: requests.Session) -> str:
     """Fetch only the first DEF14A_FETCH_BYTES of a URL (streaming)."""
-    resp = session.get(
-        url,
-        headers={"User-Agent": SEC_USER_AGENT},
-        stream=True,
-        timeout=30,
-    )
-    _last_request_ts_update()
-    resp.raise_for_status()
+    resp = _get(session, url, stream=True)  # rate-limited like every SEC request
     chunks = []
     total = 0
     for chunk in resp.iter_content(chunk_size=8192):
@@ -475,11 +478,6 @@ def _fetch_partial(url: str, session: requests.Session) -> str:
     resp.close()
     raw = b"".join(chunks)[:DEF14A_FETCH_BYTES]
     return raw.decode("utf-8", errors="replace")
-
-
-def _last_request_ts_update():
-    global _last_request_ts
-    _last_request_ts = time.monotonic()
 
 
 # ── Meeting info parsing ──────────────────────────────────────────────────────
@@ -544,14 +542,14 @@ def test_api_key(api_key: str) -> str | None:
         return str(exc)
 
 
-def _parse_with_claude(html_text: str, api_key: str) -> tuple[dict | None, str | None]:
+def _parse_with_claude(clean_text: str, api_key: str) -> tuple[dict | None, str | None]:
     """
     Use Claude Haiku 5.5 to extract meeting_type and meeting_date from DEF 14A
     text.  Returns (result, None) on success or (None, error_str) on failure
     so the caller can fall back to regex and surface the error.
     """
     try:
-        snippet = _build_claude_snippet(_clean_text(html_text))
+        snippet = _build_claude_snippet(clean_text)
 
         client = _anthropic.Anthropic(api_key=api_key)
         msg = client.messages.create(
@@ -677,7 +675,7 @@ _MEETING_WORDING_RE = re.compile(
 )
 
 
-def _check_date(ai_date_raw: str, html_text: str) -> tuple[str, str]:
+def _check_date(ai_date_raw: str, text: str) -> tuple[str, str]:
     """
     API Parsing shows Ledger's date only when the proxy statement itself
     states that exact date within 300 characters of meeting wording ("annual
@@ -690,7 +688,6 @@ def _check_date(ai_date_raw: str, html_text: str) -> tuple[str, str]:
     ai_date = _parse_meeting_date(ai_date_raw)
     if ai_date is None:
         return "unconfirmed", f"Ledger: {ai_date_raw}"
-    text = _clean_text(html_text)
     stated = re.compile(
         rf"\b{ai_date:%B}\s+{ai_date.day}(?:st|nd|rd|th)?,?\s+{ai_date.year}\b", re.IGNORECASE
     )
